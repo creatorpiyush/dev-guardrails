@@ -1,0 +1,13 @@
+{
+  "name": "git-workflow-guard",
+  "version": "1.0.0",
+  "description": "Blocks edits, commits, and pushes on protected branches, enforces Conventional Commits, and asks before every push.",
+  "author": {
+    "name": "Piyush Anand",
+    "email": "piyushanand.1221@gmail.com"
+  },
+  "repository": "https://github.com/creatorpiyush/dev-guardrails",
+  "homepage": "https://github.com/creatorpiyush/dev-guardrails#readme",
+  "license": "MIT",
+  "keywords": ["git", "workflow", "branch-protection", "conventional-commits", "hooks", "pull-request"]
+}
