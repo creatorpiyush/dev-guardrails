@@ -8,9 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 python -m pip install pytest                      # only test dependency
 python -m pytest                                  # all tests
 python -m pytest tests/test_git_guard.py::test_no_verify_asks   # one test
+python -m pytest tests/test_secret_scan.py                       # one plugin's tests
 python -m pytest -k push                          # tests matching a name
 claude plugin validate .                          # marketplace.json + every relative-path plugin
-claude plugin validate ./git-workflow-guard       # one plugin's manifest
+claude plugin validate ./<plugin>                 # one plugin's manifest
 ```
 
 There is no build or lint step. CI (`.github/workflows/ci.yml`) runs pytest on ubuntu/macos/windows across Python 3.9 to 3.15, and parses every `*.json` file with `python3 -m json.tool`.
@@ -36,6 +37,13 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 - Commit subjects come from the first `-m`/`--message`/`-F -`/short-option cluster (`-am`). Heredocs are extracted with the `HEREDOC` regex, from inside the `-m` value or from the raw command for `-F -`.
 - Push targets include explicit refspec destinations (`src:dst`, `+` = force, `HEAD` → current branch, `refs/heads/` stripped). With no refspec, the targets are the current branch and its upstream's branch name.
 - `skills/git-workflow-guard/SKILL.md` is model-facing guidance: confirm the branch name, then the commit message, then the pre-push checklist and PR body. Hook block messages also instruct Claude. If you change a rule, update the hook messages, the SKILL.md, and the README table together.
+
+### secret-scan-guard
+
+- `hooks/secret_scan.py` follows the same contract and fail-open wrapper as `git_guard.py`. `split_segments` and `git_invocations` are **copied** from `git_guard.py`, because plugins install separately and can't import each other. When you fix parsing in one, fix the other.
+- Edits are scanned only when the file would be committed. Files outside a repo, and files that `git check-ignore` reports as ignored, are skipped.
+- `git commit` scans added lines of `git diff --cached`, plus `git diff` for `-a`-style commits. `RULES` holds high-confidence regexes only. Matches are redacted in messages, because stderr reaches the transcript.
+- Fake secrets in `tests/test_secret_scan.py` are built by string concatenation. Keep it that way, or this guard and GitHub push protection will flag the test file.
 
 ### Tests
 
