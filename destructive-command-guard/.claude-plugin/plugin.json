@@ -1,0 +1,20 @@
+{
+  "name": "destructive-command-guard",
+  "version": "1.0.0",
+  "description": "Blocks catastrophic shell commands like rm -rf ~ and mkfs, and asks before git resets, database drops, infrastructure teardown, and curl | sh.",
+  "author": {
+    "name": "Piyush Anand",
+    "email": "piyushanand.1221@gmail.com"
+  },
+  "repository": "https://github.com/creatorpiyush/dev-guardrails",
+  "homepage": "https://github.com/creatorpiyush/dev-guardrails#readme",
+  "license": "MIT",
+  "keywords": [
+    "safety",
+    "rm",
+    "database",
+    "terraform",
+    "kubernetes",
+    "hooks"
+  ]
+}
