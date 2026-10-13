@@ -1,7 +1,7 @@
 {
   "name": "secret-scan-guard",
   "version": "1.0.0",
-  "description": "Blocks edits and commits that put API keys, tokens, or private keys into tracked files, and asks before staging .env files.",
+  "description": "Blocks edits, commits, and pushes that put API keys, tokens, or private keys into tracked files, and asks on weaker matches and .env files.",
   "author": {
     "name": "Piyush Anand",
     "email": "piyushanand.1221@gmail.com"

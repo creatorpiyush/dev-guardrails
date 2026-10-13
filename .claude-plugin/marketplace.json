@@ -14,7 +14,7 @@
     {
       "name": "secret-scan-guard",
       "source": "./secret-scan-guard",
-      "description": "Blocks edits and commits that put API keys, tokens, or private keys into tracked files, and asks before staging .env files."
+      "description": "Blocks edits, commits, and pushes that put API keys, tokens, or private keys into tracked files, and asks on weaker matches and .env files."
     },
     {
       "name": "destructive-command-guard",
