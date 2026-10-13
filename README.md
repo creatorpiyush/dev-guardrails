@@ -6,7 +6,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | :- | :- |
 | [git-workflow-guard](#git-workflow-guard) | Edits, commits, and pushes on protected branches. Requires Conventional Commits and asks before every push |
 | [secret-scan-guard](#secret-scan-guard) | API keys, tokens, and private keys in tracked files and commits. Asks before staging `.env` files |
-| [destructive-command-guard](#destructive-command-guard) | `rm -rf ~`, disk wipes, git resets, database drops, infrastructure teardown, and `curl \| sh` |
+| [destructive-command-guard](#destructive-command-guard) | Irreversible shell commands: `rm -rf` on the wrong path, disk wipes, `curl \| sh`, `DROP TABLE`, `terraform destroy` |
 
 ## Install
 
@@ -112,41 +112,78 @@ Secrets written through Bash, such as `echo "$KEY" > config.py`, aren't caught a
 
 ## destructive-command-guard
 
-Checks every Bash and PowerShell command. It follows `cd`, and looks through `sudo`, `env`, `nohup`, `time`, and `VAR=value` prefixes.
+Catches irreversible shell commands before Claude runs them, and says what to do instead.
 
-**Blocked.** These are never right for an agent to run. Claude is told to ask you to run the command yourself.
+### How it parses commands
 
-| Command | Example |
-| :- | :- |
-| Recursive `rm` / `Remove-Item -Recurse` whose target is `/`, a system directory, your home directory, the project root, or any parent of them | `rm -rf ~`, `rm -rf .` or `rm -rf *` at the project root, `rm -rf ..` |
-| `--no-preserve-root` | |
-| Disk wipes | `mkfs`, `dd of=/dev/sda`, `Format-Volume`, `diskutil eraseDisk` |
-| Recursive `chmod`/`chown` on the targets above | `chmod -R 777 /` |
-| Fork bomb | `:(){ :\|:& };:` |
+The hook doesn't search the raw command string. It tokenises the command with `shlex` and splits it into simple commands on `;`, `&&`, `||`, `|`, and newlines. It then unwraps `sudo`, `env`, `nohup`, `time`, `xargs`, `bash -c`/`sh -c`, `eval`, `$(...)`, backticks, and heredocs, and checks each inner command, up to 5 levels deep. It reads the command name and arguments, so `echo "rm -rf /"` and `grep "DROP TABLE" schema.sql` aren't flagged. A command `shlex` can't parse gets a few conservative pattern checks and is otherwise allowed.
 
-**Asks you first.** These are sometimes intended.
+### Rules
 
-| Group | Commands |
-| :- | :- |
-| Files | Recursive `rm` outside the project (temp directories are allowed) or with a variable target such as `"$DIR/"`, `find -delete`, `xargs rm`, `chmod -R 777` |
-| Git | `reset --hard`, `clean -f`, `checkout -- .`, `restore .`, `stash drop\|clear`, `branch -D`, force push |
-| Databases | `DROP`, `TRUNCATE`, and `DELETE` without `WHERE` when a DB client runs (`psql`, `mysql`, `sqlite3`, `mongosh`, ...). Also `dropdb`, `rails db:drop\|reset`, `prisma migrate reset`, `--accept-data-loss`, `manage.py flush`, `artisan migrate:fresh` |
-| Infrastructure | `terraform destroy`, `pulumi destroy`, `kubectl delete`, `helm uninstall`, `docker system\|volume prune`, `aws s3 rm --recursive`, `aws s3 rb`, `gcloud`/`az ... delete` |
-| Remote scripts | `curl\|wget ... \| sh`, `bash -c "$(curl ...)"`, `bash <(curl ...)` |
+Every block or prompt shows the rule id, why the command is dangerous, and a safer alternative.
 
-The plugin's skill steers Claude to the safer path first: dry runs, `terraform plan`, `git stash` before a reset, and backups before a `DROP`.
+| Rule id | Catches | Default |
+| :- | :- | :- |
+| `fs.rm-catastrophic` | `rm` with `-r` or `-f` on `/`, `/*`, `~`, `$HOME`, `.`, `..`, `*`, the project root, or a parent of it; `--no-preserve-root` | deny |
+| `fs.rm-unresolved` | `rm -r` whose target is a variable or comes from `xargs` (`rm -rf $DIR/` becomes `rm -rf /` when `DIR` is empty) | ask |
+| `fs.rm-outside-repo` | `rm -r` on a path outside the repo | ask |
+| `fs.rm-inside-repo` | `rm -r` on a path inside the repo, except build output (`node_modules`, `dist`, `build`, `target`, `__pycache__`, `.venv`, `.pytest_cache`, `coverage`, `.next`), which is allowed silently | ask |
+| `fs.find-delete` | `find ... -delete`, `find ... -exec rm` | ask |
+| `fs.shred-truncate` | `shred`; `truncate` on anything but `.log` files and build output | ask |
+| `disk.overwrite` | `mkfs*`, `dd of=/dev/sd*`, redirects to `/dev/sd*` or `/dev/nvme*`, `Format-Volume`, `diskutil erase*` | deny |
+| `fs.chmod-root` | `chmod -R` / `chown -R` on `/` or `~` | deny |
+| `fs.chmod-777` | `chmod -R 777` anywhere else | ask |
+| `proc.fork-bomb` | `:(){ :\|:& };:` | deny |
+| `remote.pipe-to-shell` | `curl\|wget ... \| sh/bash/zsh/python`, `bash <(curl ...)`, `eval "$(curl ...)"`, PowerShell `iwr ... \| iex` | ask |
+| `db.drop` | `DROP TABLE\|DATABASE\|SCHEMA`, `TRUNCATE` | ask |
+| `db.unbounded-write` | `DELETE FROM` or `UPDATE` without `WHERE` | ask |
+| `db.flush` | `FLUSHALL`, `FLUSHDB`, `dropDatabase()` | ask |
+| `infra.terraform` | `terraform destroy`, `terraform apply -auto-approve` | ask |
+| `infra.kubectl-delete` | `kubectl delete ns ...`, `kubectl delete ... --all` | ask |
+| `infra.docker-prune` | `docker system prune -a`, `docker volume prune` | ask |
+| `infra.cloud-storage-delete` | `aws s3 rm --recursive`, `aws s3 rb --force` | ask |
+| `infra.cloud-delete` | `gcloud ... delete`, `az ... delete` | ask |
+
+The database rules apply when `psql`, `mysql`, `mariadb`, `sqlite3`, `mongo`/`mongosh`, or `redis-cli` gets SQL through `-c`, `-e`, `--eval`, positional arguments, a heredoc, or a here-string.
+
+**Escalation to deny:**
+- Any ask rule becomes deny under `sudo`, so `sudo rm -rf /var/x` is denied.
+- A database rule becomes deny when the host or connection string in the same command matches `prodPattern`, which defaults to `prod(uction)?`. That covers `-h`, `--host`, a `postgres://...` argument, or a `DATABASE_URL=...` prefix. Table names aren't checked, so `DROP TABLE products` isn't escalated.
+
+**Git is out of scope.** `git reset --hard`, `git clean`, force pushes, and `git branch -D` belong to git-workflow-guard. Covering them here too would show two prompts for one command.
 
 ### Configuration
 
-To skip the prompt for commands you run routinely, commit `.claude/destructive-commands.json`:
+Two optional files with the same format:
+
+| File | Trust | May |
+| :- | :- | :- |
+| `~/.claude/destructive-guard.json` | Trusted (yours) | Change any rule, including to `allow`; set `allow`; add `extraRules`; replace `prodPattern` |
+| `.claude/destructive-guard.json` in the repo | Untrusted (comes with a clone) | Add `extraRules` (ask or deny only); make rules **stricter**; add to `prodPattern` |
 
 ```json
 {
-  "allow": ["^docker system prune", "^kubectl --context kind-dev delete"]
+  "rules": { "infra.docker-prune": "allow", "fs.rm-inside-repo": "deny" },
+  "allow": ["rm -rf src/generated"],
+  "extraRules": [
+    { "id": "team.deploy-prod", "regex": "^\\./deploy\\.sh prod", "action": "deny", "reason": "deploys to production" }
+  ],
+  "prodPattern": "prod(uction)?|live"
 }
 ```
 
-Each entry is a regular expression searched in each command. An allow entry only skips the prompt; it never lifts a block. If the file is invalid, the hook ignores it.
+- `allow` holds regular expressions. Each must match a whole command, or a whole simple command within it.
+- A repo file can never loosen anything. If it tries to downgrade a rule, set `allow`, or add an `allow` extra rule, the hook ignores that entry and logs a warning. A cloned repository can't switch off your protections.
+- An invalid file is ignored as a whole, the defaults apply, and a warning goes to stderr. Run `claude --debug` to see the warning.
+- To switch the plugin off temporarily, set `DESTRUCTIVE_GUARD_DISABLE=1` in the environment Claude Code starts in.
+
+### How it combines with permission rules and other hooks
+
+- The hook runs before Claude Code's permission rules.
+- A deny exits with code 2. That stops the call even if one of your allow rules matches it.
+- An ask forces a permission prompt, even with a matching allow rule or in auto mode.
+- Your own `deny` and `ask` permission rules still apply on top. The hook never returns `allow`, so it can only add friction.
+- When several hooks answer the same call, Claude Code takes the strictest decision: deny, then defer, then ask, then allow.
 
 ## Limitations
 

@@ -47,10 +47,19 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 
 ### destructive-command-guard
 
-- `hooks/destructive_guard.py` handles Bash/PowerShell only. It splits commands with `split_segments` (adapted copy, with `escape=""` for PowerShell so Windows paths survive), follows `cd`, and strips wrappers (`sudo`, `env`, `VAR=`).
-- Recursive `rm`/`chmod`/`chown` targets go through `classify_target`. A target that is the root, a system directory, home, the project root, or an ancestor of these is blocked. A target inside the project or a temp dir is allowed. Anything else, or a target with an unexpandable `$VAR`, gets asked.
-- Everything else is regex data: `BLOCK_RULES`/`ASK_RULES` match each wrapper-stripped segment, and `PIPE_TO_SHELL`, `FORK_BOMB`, and `SQL_RULES` match the raw command, since pipes and heredocs span segments. SQL rules apply only when a segment runs a `DB_CLIENTS` binary. The rules are compiled with `re.I`, so wrap case-sensitive flags in `(?-i:...)`, as in `branch -D`.
-- The config `allow` list only downgrades an ask to an allow. Blocks are never configurable.
+- `hooks/destructive_command_guard.py` handles parsing, config, and decisions. `hooks/rules.py` holds the rule table: `Rule(id, matcher, action, reason, safer)`, plus each matcher. The script imports `rules` from its own directory.
+- `analyze()` takes these steps, recursing to `MAX_DEPTH`:
+  1. Extracts heredoc bodies into placeholders.
+  2. Recurses into `$(...)`, `<(...)`, and backticks, but not inside single quotes, and not backticks in PowerShell.
+  3. Splits on `; && || |` and newlines with `shlex`.
+  4. `unwrap()` strips keywords, `VAR=`, `sudo`, `env`, `xargs`, and similar wrappers. `split_io()` strips redirects, heredocs, and here-strings.
+  5. Builds a `Cmd` and runs every matcher on it.
+  6. Recurses into `bash -c`, `eval`, `pwsh -Command`, and shell stdin scripts.
+  If tokenising fails, only the `FALLBACK` regexes run.
+- `decide()` applies the configured action, then the allow regexes, then escalation: ask becomes deny under `sudo`, or for `db.*` rules when a connection string matches `prodPattern`. Connection strings come from `rules.db_parts()`, never from SQL text.
+- Trust boundary in `resolve_settings()`: the user file (`~/.claude/destructive-guard.json`) can do anything. The repo file can only tighten rules, add rules, and add prod patterns. Every loosening attempt is ignored with a warning. Keep it that way.
+- Git commands are deliberately out of scope (git-workflow-guard owns them).
+- Tests set a fake `HOME`/`USERPROFILE` per test, so the real user config never applies.
 
 ### Tests
 
