@@ -1,0 +1,20 @@
+{
+  "name": "secret-scan-guard",
+  "version": "1.0.0",
+  "description": "Blocks edits and commits that put API keys, tokens, or private keys into tracked files, and asks before staging .env files.",
+  "author": {
+    "name": "Piyush Anand",
+    "email": "piyushanand.1221@gmail.com"
+  },
+  "repository": "https://github.com/creatorpiyush/dev-guardrails",
+  "homepage": "https://github.com/creatorpiyush/dev-guardrails#readme",
+  "license": "MIT",
+  "keywords": [
+    "secrets",
+    "security",
+    "api-keys",
+    "env",
+    "hooks",
+    "git"
+  ]
+}

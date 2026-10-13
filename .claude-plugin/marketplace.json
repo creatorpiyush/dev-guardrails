@@ -10,6 +10,11 @@
       "name": "git-workflow-guard",
       "source": "./git-workflow-guard",
       "description": "Blocks edits, commits, and pushes on protected branches, enforces Conventional Commits, and asks before every push."
+    },
+    {
+      "name": "secret-scan-guard",
+      "source": "./secret-scan-guard",
+      "description": "Blocks edits and commits that put API keys, tokens, or private keys into tracked files, and asks before staging .env files."
     }
   ]
 }
