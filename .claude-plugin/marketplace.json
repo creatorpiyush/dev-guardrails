@@ -15,6 +15,11 @@
       "name": "secret-scan-guard",
       "source": "./secret-scan-guard",
       "description": "Blocks edits and commits that put API keys, tokens, or private keys into tracked files, and asks before staging .env files."
+    },
+    {
+      "name": "destructive-command-guard",
+      "source": "./destructive-command-guard",
+      "description": "Blocks catastrophic shell commands like rm -rf ~ and mkfs, and asks before git resets, database drops, infrastructure teardown, and curl | sh."
     }
   ]
 }
