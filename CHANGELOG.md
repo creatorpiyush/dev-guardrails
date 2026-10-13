@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `secret-scan-guard` plugin 1.0.0: blocks edits and commits that add API keys, tokens, or private keys to tracked files, and asks before `git add` of `.env` files and private keys. Gitignored files are skipped. Allowlist with `.claude/secret-scan.json`.
+- `secret-scan-guard` plugin 1.0.0: blocks edits and commits that add API keys, tokens, or private keys to tracked files, and asks before `git add` of `.env` files and private keys. Gitignored files are skipped. Allowlist with `.claude/secret-scan.json`. Its skill guides credential handling and leak response.
 
 ## [1.0.0] - 2026-10-13
 

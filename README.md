@@ -103,6 +103,8 @@ To allow known false positives such as test fixtures, commit `.claude/secret-sca
 - `allowPatterns` are regular expressions. A match is ignored when the regex is found in the matched secret.
 - If the file is invalid, the hook ignores the whole file and nothing is allowlisted.
 
+The plugin's skill shows Claude the safe pattern: read credentials from environment variables, keep values in a gitignored `.env`, and document names in `.env.example`. It also covers what to do when a secret was committed or pushed.
+
 Secrets written through Bash, such as `echo "$KEY" > config.py`, aren't caught at edit time. They're still caught when the file is committed.
 
 ## Limitations
