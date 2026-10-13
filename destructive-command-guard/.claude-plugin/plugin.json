@@ -1,7 +1,7 @@
 {
   "name": "destructive-command-guard",
   "version": "1.0.0",
-  "description": "Blocks catastrophic shell commands like rm -rf ~ and mkfs, and asks before git resets, database drops, infrastructure teardown, and curl | sh.",
+  "description": "Catches irreversible shell commands (rm -rf on the wrong path, disk wipes, curl | sh, DROP TABLE, terraform destroy) and explains the safer alternative.",
   "author": {
     "name": "Piyush Anand",
     "email": "piyushanand.1221@gmail.com"
@@ -15,6 +15,7 @@
     "database",
     "terraform",
     "kubernetes",
+    "shell",
     "hooks"
   ]
 }
