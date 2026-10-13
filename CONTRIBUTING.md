@@ -33,6 +33,21 @@ claude plugin validate .
 claude plugin validate ./git-workflow-guard
 ```
 
+### Fake secrets in tests
+
+Never write a complete token literal anywhere in the repo, including tests, fixtures, and README examples. GitHub push protection rejects the push, and secret-scan-guard blocks the edit. Build fake secrets at runtime from pieces instead:
+
+```python
+AWS_KEY = "AK" + "IA" + rand(16)       # split the provider prefix
+GH_TOKEN = "gh" + "p_" + rand(36)      # random body from a seeded generator
+```
+
+See `tests/test_secret_scan.py`. To check that nothing slipped through, run the guard on the repo's tracked files and expect 0 fingerprints:
+
+```bash
+python3 secret-scan-guard/hooks/secret_scan.py --baseline --output /tmp/check.json
+```
+
 ## Try your changes in Claude Code
 
 Add your clone as a local marketplace:

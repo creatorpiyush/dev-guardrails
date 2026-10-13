@@ -5,7 +5,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | Plugin | What it guards |
 | :- | :- |
 | [git-workflow-guard](#git-workflow-guard) | Edits, commits, and pushes on protected branches. Requires Conventional Commits and asks before every push |
-| [secret-scan-guard](#secret-scan-guard) | API keys, tokens, and private keys in tracked files and commits. Asks before staging `.env` files |
+| [secret-scan-guard](#secret-scan-guard) | API keys, tokens, and private keys in tracked files, commits, and pushes. Asks before staging `.env` files |
 | [destructive-command-guard](#destructive-command-guard) | Irreversible shell commands: `rm -rf` on the wrong path, disk wipes, `curl \| sh`, `DROP TABLE`, `terraform destroy` |
 
 ## Install
@@ -80,35 +80,67 @@ A commit message built from shell variables (`-m "$MSG"`) or read from a file (`
 
 ## secret-scan-guard
 
-Keeps credentials out of anything git will commit.
+Keeps credentials out of anything git will commit or push.
 
 | Action | Condition | Result |
 | :- | :- | :- |
-| Edit, Write, MultiEdit, NotebookEdit | New content in a file git would track contains a secret | **Blocked.** The secret is redacted in the message |
-| Same | File is gitignored (such as `.env`), or outside a git repo | Allowed. That's where secrets belong |
-| `git commit` | Lines added in the staged diff contain a secret. With `-a`, unstaged changes to tracked files are scanned too | **Blocked** |
+| Edit, Write, MultiEdit, NotebookEdit | The new text (not the rest of the file) contains a high-confidence secret | **Blocked** |
+| Same | The new text contains a medium-confidence secret | **Asks** you |
+| Same | File is gitignored (such as `.env`), outside a git repo, a lockfile, minified, or binary | Allowed |
+| Same | File is `.claude/secret-scan.json`, `~/.claude/secret-scan.json`, or the baseline | **Asks** you |
+| `git commit` | Lines added in the staged diff contain a secret. With `-a`, unstaged tracked changes are scanned too; with `git commit <path>`, those paths are | **Blocked** (high) or **asks** (medium) |
+| `git commit` | The commit includes `.env`, `*.pem`, `*.key`, or `id_rsa`-style files, or changes the guard's config or baseline | **Asks** you |
+| `git push` | Lines added in any local commit about to be pushed (not yet on a remote) contain a secret | **Blocked** (high) or **asks** (medium) |
 | `git add` | Paths include `.env`, `.env.*`, `*.pem`, `*.key`, or `id_rsa`-style keys. `.env.example`, `.sample`, `.template`, and `.dist` are fine | **Asks** you |
+| Any Bash or PowerShell command | The command line itself contains a secret, such as `curl -H "Authorization: Bearer ..."` | **Asks** you. It's already in the transcript, so blocking wouldn't help |
 
-Detected secrets: AWS access key IDs, GitHub and GitLab tokens, Slack tokens and webhooks, OpenAI and Anthropic API keys, Stripe live keys, Google API keys, npm tokens, private key blocks, and JSON Web Tokens. Only high-confidence patterns are used. There's no entropy guessing, and documentation placeholders containing `EXAMPLE` are ignored.
+High confidence (blocks): AWS access key IDs, GitHub and GitLab tokens, Slack tokens and webhooks, Anthropic and OpenAI API keys, Stripe live keys, SendGrid keys, npm tokens, Twilio API keys, and private key blocks.
+
+Medium confidence (asks): Google API keys (often public in web apps), credentials in URLs (`scheme://user:password@host`), JSON Web Tokens, `password`/`secret`/`token`/`api_key`/`auth` assignments whose value is 16+ characters with at least 3.5 bits/char of entropy, and 40-character AWS secret keys within 3 lines of an AWS key or the word `aws`.
+
+Rule ids are in [`hooks/patterns.py`](secret-scan-guard/hooks/patterns.py). These are never findings:
+
+- Placeholder values containing `example`, `dummy`, `changeme`, `your_`, `xxxx`, `<...>`, `${...}`, `$VAR`, `process.env.`, `os.environ`, or `os.getenv`, or a single repeated character.
+- Integrity hashes (`sha512-...`).
+- A line containing `secret-scan:allow`. If Claude is the one adding the marker, the hook asks instead, so Claude can't allowlist its own secret.
+
+Messages show the rule id, file, line, and at most the first 4 characters of the match (just the provider prefix, such as `ghp_***`). Full values never reach stdout, stderr, or disk.
 
 ### Configuration
 
-To allow known false positives such as test fixtures, commit `.claude/secret-scan.json`:
+There are two files with the same format:
 
 ```json
 {
-  "allowPaths": ["tests/fixtures/*"],
-  "allowPatterns": ["^sk-test-"]
+  "allowPaths": ["tests/fixtures/**"],
+  "allowPatterns": ["^sk_test_"],
+  "extraPatterns": [{"id": "internal-token", "regex": "int_[A-Za-z0-9]{32}", "action": "deny"}],
+  "baseline": ".claude/secret-scan-baseline.json"
 }
 ```
 
-- `allowPaths` are `fnmatch` globs on repo-relative paths, where `*` also matches `/`.
-- `allowPatterns` are regular expressions. A match is ignored when the regex is found in the matched secret.
-- If the file is invalid, the hook ignores the whole file and nothing is allowlisted.
+- `~/.claude/secret-scan.json` is yours and trusted. It can use every key.
+- `.claude/secret-scan.json` in the repo can only add `extraPatterns` and name a `baseline`. Its `allowPaths` and `allowPatterns` are ignored with a warning, so a cloned repo, or Claude editing one, can't allowlist secrets.
+- `allowPaths` are `fnmatch` globs on repo-relative paths, where `*` also matches `/`. `allowPatterns` are regexes searched in the matched value. `extraPatterns` take `action` `deny` (block) or `ask`.
+- An invalid file is ignored entirely, and the hook shows you a warning.
+
+### Baseline for existing repos
+
+To adopt the hook in a repo that already contains findings (test fixtures, revoked keys), record them once:
+
+```bash
+python3 ~/.claude/plugins/marketplaces/dev-guardrails/secret-scan-guard/hooks/secret_scan.py --baseline
+```
+
+Run it from inside the repo. The script is in the marketplace clone shown above, or in your own clone of this repository. It scans every tracked file and writes `.claude/secret-scan-baseline.json`, or the configured `baseline` path, or `--output PATH`. The file holds only SHA-256 fingerprints of path, rule id, and value. It never holds the secrets. Commit it so your team shares it. A recorded finding stops blocking in that file. A new secret, or the same secret in another file, still blocks. Regenerate after removing secrets to drop stale entries. A renamed file loses its suppression.
+
+### Turning it off
+
+Set `SECRET_SCAN_GUARD_DISABLE=1` in the environment you start `claude` from. Setting it inside a Bash command has no effect, because the hook runs in Claude Code's own environment.
 
 The plugin's skill shows Claude the safe pattern: read credentials from environment variables, keep values in a gitignored `.env`, and document names in `.env.example`. It also covers what to do when a secret was committed or pushed.
 
-Secrets written through Bash, such as `echo "$KEY" > config.py`, aren't caught at edit time. They're still caught when the file is committed.
+A secret written through Bash, such as `echo "$KEY" > config.py`, isn't caught at edit time. It's still caught when the file is committed or pushed.
 
 ## destructive-command-guard
 
