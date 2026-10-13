@@ -61,6 +61,15 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 - Git commands are deliberately out of scope (git-workflow-guard owns them).
 - Tests set a fake `HOME`/`USERPROFILE` per test, so the real user config never applies.
 
+### protected-files-guard
+
+- `hooks/protected_files_guard.py` follows the same contract and fail-open wrapper as `git_guard.py`. Rules are `(patterns, action, reason)` in `DEFAULT_RULES`, with `DEFAULT_ALLOW` for `.env.example` and friends. `deny` exits 2, `ask` prompts.
+- `glob_re()` converts gitignore-style globs to regex: no `/` matches the name at any depth, a `/` anchors at the repo root, `**/` is zero or more directories. Matching is case-insensitive. Don't swap it for `fnmatch`, which gets `**` wrong.
+- File tools: `targets_for()` checks the path as named (parent dir realpath'd) and its full `realpath`, each relative to its own repo root. Paths outside a repo are allowed.
+- Shell tools: `split_segments` is adapted from `git_guard.py` with `<>` added as punctuation, so redirects are tokens. `shell_writes()` is a heuristic over redirects, `tee`, `sed -i`, `cp`, `mv`, `rm`, `truncate`, `git checkout --`, `git restore`, and PowerShell write cmdlets. Directory targets expand to their tracked files via `git ls-files`. Keep the README clear that it can be bypassed.
+- `.claude/protected-files.json` (repo) adds `rules` and `allow`, and `replaceDefaults` drops the defaults. Edits to that file always ask, regardless of config. Invalid config falls back to defaults with a warning on stderr plus `systemMessage` (stderr isn't shown on exit 0).
+- `PROTECTED_FILES_GUARD_DISABLE=1` turns it off.
+
 ### Tests
 
 `tests/test_git_guard.py` runs the script as a subprocess, piping JSON payloads into `sys.executable`, against throwaway repos. The `repo` fixture creates an **unborn** repo and switches branches with `git symbolic-ref HEAD refs/heads/<name>`, so no commits or git identity are needed. Keep tests that way so they stay fast and work on Windows CI.

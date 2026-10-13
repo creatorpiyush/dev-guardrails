@@ -7,6 +7,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [git-workflow-guard](#git-workflow-guard) | Edits, commits, and pushes on protected branches. Requires Conventional Commits and asks before every push |
 | [secret-scan-guard](#secret-scan-guard) | API keys, tokens, and private keys in tracked files and commits. Asks before staging `.env` files |
 | [destructive-command-guard](#destructive-command-guard) | Irreversible shell commands: `rm -rf` on the wrong path, disk wipes, `curl \| sh`, `DROP TABLE`, `terraform destroy` |
+| [protected-files-guard](#protected-files-guard) | Silent edits to lockfiles, `.env` and key files, CI config, migrations, and license files |
 
 ## Install
 
@@ -17,6 +18,7 @@ In Claude Code:
 /plugin install git-workflow-guard@dev-guardrails
 /plugin install secret-scan-guard@dev-guardrails
 /plugin install destructive-command-guard@dev-guardrails
+/plugin install protected-files-guard@dev-guardrails
 ```
 
 Or from your shell:
@@ -26,6 +28,7 @@ claude plugin marketplace add creatorpiyush/dev-guardrails
 claude plugin install git-workflow-guard@dev-guardrails
 claude plugin install secret-scan-guard@dev-guardrails
 claude plugin install destructive-command-guard@dev-guardrails
+claude plugin install protected-files-guard@dev-guardrails
 ```
 
 Installing a plugin enables its hooks. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -184,6 +187,47 @@ Two optional files with the same format:
 - An ask forces a permission prompt, even with a matching allow rule or in auto mode.
 - Your own `deny` and `ask` permission rules still apply on top. The hook never returns `allow`, so it can only add friction.
 - When several hooks answer the same call, Claude Code takes the strictest decision: deny, then defer, then ask, then allow.
+
+## protected-files-guard
+
+Stops Claude from silently editing files that should only change on purpose: lockfiles, `.env` and key files, CI config, migrations, and license or ownership files. Secrets are denied. Everything else asks you first.
+
+| Files | Result | Why |
+| :- | :- | :- |
+| `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, `*.keystore`, `credentials.json` | **Denied** | Holds secrets. `.env.example`, `.env.sample`, and `.env.template` are allowed |
+| `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `Gemfile.lock`, `composer.lock`, `go.sum` | **Asks** you | Change dependencies with the package manager, not by hand |
+| `.github/workflows/**`, `.gitlab-ci.yml`, `Jenkinsfile`, `.circleci/**` | **Asks** you | CI/CD config |
+| `**/migrations/**`, `**/alembic/versions/**`, `**/db/migrate/**` | **Asks** you | Database migrations |
+| `LICENSE*`, `CODEOWNERS`, `SECURITY.md` | **Asks** you | Legal and policy files |
+| `.claude/protected-files.json` | **Asks** you, always | The guard's own config. `allow` and `replaceDefaults` can't turn this off |
+
+A pattern without `/` matches the file name at any depth, so `yarn.lock` also matches `web/yarn.lock`. A pattern with `/` is anchored at the repo root. Matching is case-insensitive.
+
+### How it works
+
+- **File tools are checked exactly.** For Edit, Write, MultiEdit, and NotebookEdit, the hook resolves the target path with `realpath`, makes it relative to the git repo root, and matches it against the rules. A symlink is checked both as named and where it points, so `notes.txt -> .env` is denied. Files outside a git repo are allowed.
+- **Shell commands are checked heuristically.** For Bash and PowerShell, the hook looks for writes through `>`, `>>`, `tee`, `sed -i`, `cp`, `mv`, `rm`, `truncate`, `git checkout -- <path>`, `git restore <path>`, and the PowerShell cmdlets `Set-Content`, `Add-Content`, `Out-File`, `Clear-Content`, `Copy-Item`, `Move-Item`, and `Remove-Item`. It follows `cd` and `git -C`, expands `~`, environment variables, and globs, and checks the tracked files under a directory target such as `rm -rf db`. **This can be bypassed.** `python -c`, `dd`, `perl -i`, scripts, and paths built at run time aren't seen. It catches honest mistakes, not an agent trying to get around it.
+- **The skill handles judgment.** [`skills/protected-files-guard/SKILL.md`](protected-files-guard/skills/protected-files-guard/SKILL.md) tells Claude never to work around a block, to explain why the file is protected, and to propose the proper change, such as `npm install <pkg>` for a lockfile or a new migration instead of editing an old one.
+
+### Configuration
+
+Commit `.claude/protected-files.json` at the repo root:
+
+```json
+{
+  "rules": [{ "pattern": "infra/**", "action": "deny", "reason": "Managed by platform team" }],
+  "allow": ["docs/migrations/**"],
+  "replaceDefaults": false
+}
+```
+
+- `rules` are added to the defaults. Each needs a `pattern` and an `action` of `ask` or `deny`. `reason` is shown in the message.
+- `allow` patterns override every matching rule, default or custom.
+- `replaceDefaults: true` drops the default rules and the default `.env.example` allowances, leaving only yours.
+- Patterns are globs: `*` and `?` don't cross `/`, `**/` matches zero or more directories, and a trailing `/**` matches everything below.
+- If the file is invalid, the hook ignores all of it, uses the defaults, and shows a warning.
+
+**Emergency escape hatch:** set `PROTECTED_FILES_GUARD_DISABLE=1` in the environment Claude Code starts in to turn the hook off for that session.
 
 ## Limitations
 
