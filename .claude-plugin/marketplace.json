@@ -1,0 +1,15 @@
+{
+  "name": "dev-guardrails",
+  "description": "Guardrail plugins for Claude Code that keep agent work inside your team's engineering workflow.",
+  "owner": {
+    "name": "Piyush Anand",
+    "email": "piyushanand.1221@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "git-workflow-guard",
+      "source": "./git-workflow-guard",
+      "description": "Blocks edits, commits, and pushes on protected branches, enforces Conventional Commits, and asks before every push."
+    }
+  ]
+}
