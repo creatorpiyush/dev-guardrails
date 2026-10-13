@@ -20,6 +20,11 @@
       "name": "destructive-command-guard",
       "source": "./destructive-command-guard",
       "description": "Catches irreversible shell commands (rm -rf on the wrong path, disk wipes, curl | sh, DROP TABLE, terraform destroy) and explains the safer alternative."
+    },
+    {
+      "name": "protected-files-guard",
+      "source": "./protected-files-guard",
+      "description": "Stops silent edits to lockfiles, .env and key files, CI config, migrations, and license files. Denies secrets, asks for the rest."
     }
   ]
 }
