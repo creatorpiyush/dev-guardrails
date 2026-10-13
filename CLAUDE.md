@@ -45,6 +45,22 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 - `git commit` scans added lines of `git diff --cached`, plus `git diff` for `-a`-style commits. `RULES` holds high-confidence regexes only. Matches are redacted in messages, because stderr reaches the transcript.
 - Fake secrets in `tests/test_secret_scan.py` are built by string concatenation. Keep it that way, or this guard and GitHub push protection will flag the test file.
 
+### destructive-command-guard
+
+- `hooks/destructive_command_guard.py` handles parsing, config, and decisions. `hooks/rules.py` holds the rule table: `Rule(id, matcher, action, reason, safer)`, plus each matcher. The script imports `rules` from its own directory.
+- `analyze()` takes these steps, recursing to `MAX_DEPTH`:
+  1. Extracts heredoc bodies into placeholders.
+  2. Recurses into `$(...)`, `<(...)`, and backticks, but not inside single quotes, and not backticks in PowerShell.
+  3. Splits on `; && || |` and newlines with `shlex`.
+  4. `unwrap()` strips keywords, `VAR=`, `sudo`, `env`, `xargs`, and similar wrappers. `split_io()` strips redirects, heredocs, and here-strings.
+  5. Builds a `Cmd` and runs every matcher on it.
+  6. Recurses into `bash -c`, `eval`, `pwsh -Command`, and shell stdin scripts.
+  If tokenising fails, only the `FALLBACK` regexes run.
+- `decide()` applies the configured action, then the allow regexes, then escalation: ask becomes deny under `sudo`, or for `db.*` rules when a connection string matches `prodPattern`. Connection strings come from `rules.db_parts()`, never from SQL text.
+- Trust boundary in `resolve_settings()`: the user file (`~/.claude/destructive-guard.json`) can do anything. The repo file can only tighten rules, add rules, and add prod patterns. Every loosening attempt is ignored with a warning. Keep it that way.
+- Git commands are deliberately out of scope (git-workflow-guard owns them).
+- Tests set a fake `HOME`/`USERPROFILE` per test, so the real user config never applies.
+
 ### Tests
 
 `tests/test_git_guard.py` runs the script as a subprocess, piping JSON payloads into `sys.executable`, against throwaway repos. The `repo` fixture creates an **unborn** repo and switches branches with `git symbolic-ref HEAD refs/heads/<name>`, so no commits or git identity are needed. Keep tests that way so they stay fast and work on Windows CI.

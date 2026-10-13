@@ -15,6 +15,11 @@
       "name": "secret-scan-guard",
       "source": "./secret-scan-guard",
       "description": "Blocks edits and commits that put API keys, tokens, or private keys into tracked files, and asks before staging .env files."
+    },
+    {
+      "name": "destructive-command-guard",
+      "source": "./destructive-command-guard",
+      "description": "Catches irreversible shell commands (rm -rf on the wrong path, disk wipes, curl | sh, DROP TABLE, terraform destroy) and explains the safer alternative."
     }
   ]
 }

@@ -6,6 +6,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | :- | :- |
 | [git-workflow-guard](#git-workflow-guard) | Edits, commits, and pushes on protected branches. Requires Conventional Commits and asks before every push |
 | [secret-scan-guard](#secret-scan-guard) | API keys, tokens, and private keys in tracked files and commits. Asks before staging `.env` files |
+| [destructive-command-guard](#destructive-command-guard) | Irreversible shell commands: `rm -rf` on the wrong path, disk wipes, `curl \| sh`, `DROP TABLE`, `terraform destroy` |
 
 ## Install
 
@@ -15,6 +16,7 @@ In Claude Code:
 /plugin marketplace add creatorpiyush/dev-guardrails
 /plugin install git-workflow-guard@dev-guardrails
 /plugin install secret-scan-guard@dev-guardrails
+/plugin install destructive-command-guard@dev-guardrails
 ```
 
 Or from your shell:
@@ -23,6 +25,7 @@ Or from your shell:
 claude plugin marketplace add creatorpiyush/dev-guardrails
 claude plugin install git-workflow-guard@dev-guardrails
 claude plugin install secret-scan-guard@dev-guardrails
+claude plugin install destructive-command-guard@dev-guardrails
 ```
 
 Installing a plugin enables its hooks. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -103,7 +106,84 @@ To allow known false positives such as test fixtures, commit `.claude/secret-sca
 - `allowPatterns` are regular expressions. A match is ignored when the regex is found in the matched secret.
 - If the file is invalid, the hook ignores the whole file and nothing is allowlisted.
 
+The plugin's skill shows Claude the safe pattern: read credentials from environment variables, keep values in a gitignored `.env`, and document names in `.env.example`. It also covers what to do when a secret was committed or pushed.
+
 Secrets written through Bash, such as `echo "$KEY" > config.py`, aren't caught at edit time. They're still caught when the file is committed.
+
+## destructive-command-guard
+
+Catches irreversible shell commands before Claude runs them, and says what to do instead.
+
+### How it parses commands
+
+The hook doesn't search the raw command string. It tokenises the command with `shlex` and splits it into simple commands on `;`, `&&`, `||`, `|`, and newlines. It then unwraps `sudo`, `env`, `nohup`, `time`, `xargs`, `bash -c`/`sh -c`, `eval`, `$(...)`, backticks, and heredocs, and checks each inner command, up to 5 levels deep. It reads the command name and arguments, so `echo "rm -rf /"` and `grep "DROP TABLE" schema.sql` aren't flagged. A command `shlex` can't parse gets a few conservative pattern checks and is otherwise allowed.
+
+### Rules
+
+Every block or prompt shows the rule id, why the command is dangerous, and a safer alternative.
+
+| Rule id | Catches | Default |
+| :- | :- | :- |
+| `fs.rm-catastrophic` | `rm` with `-r` or `-f` on `/`, `/*`, `~`, `$HOME`, `.`, `..`, `*`, the project root, or a parent of it; `--no-preserve-root` | deny |
+| `fs.rm-unresolved` | `rm -r` whose target is a variable or comes from `xargs` (`rm -rf $DIR/` becomes `rm -rf /` when `DIR` is empty) | ask |
+| `fs.rm-outside-repo` | `rm -r` on a path outside the repo | ask |
+| `fs.rm-inside-repo` | `rm -r` on a path inside the repo, except build output (`node_modules`, `dist`, `build`, `target`, `__pycache__`, `.venv`, `.pytest_cache`, `coverage`, `.next`), which is allowed silently | ask |
+| `fs.find-delete` | `find ... -delete`, `find ... -exec rm` | ask |
+| `fs.shred-truncate` | `shred`; `truncate` on anything but `.log` files and build output | ask |
+| `disk.overwrite` | `mkfs*`, `dd of=/dev/sd*`, redirects to `/dev/sd*` or `/dev/nvme*`, `Format-Volume`, `diskutil erase*` | deny |
+| `fs.chmod-root` | `chmod -R` / `chown -R` on `/` or `~` | deny |
+| `fs.chmod-777` | `chmod -R 777` anywhere else | ask |
+| `proc.fork-bomb` | `:(){ :\|:& };:` | deny |
+| `remote.pipe-to-shell` | `curl\|wget ... \| sh/bash/zsh/python`, `bash <(curl ...)`, `eval "$(curl ...)"`, PowerShell `iwr ... \| iex` | ask |
+| `db.drop` | `DROP TABLE\|DATABASE\|SCHEMA`, `TRUNCATE` | ask |
+| `db.unbounded-write` | `DELETE FROM` or `UPDATE` without `WHERE` | ask |
+| `db.flush` | `FLUSHALL`, `FLUSHDB`, `dropDatabase()` | ask |
+| `infra.terraform` | `terraform destroy`, `terraform apply -auto-approve` | ask |
+| `infra.kubectl-delete` | `kubectl delete ns ...`, `kubectl delete ... --all` | ask |
+| `infra.docker-prune` | `docker system prune -a`, `docker volume prune` | ask |
+| `infra.cloud-storage-delete` | `aws s3 rm --recursive`, `aws s3 rb --force` | ask |
+| `infra.cloud-delete` | `gcloud ... delete`, `az ... delete` | ask |
+
+The database rules apply when `psql`, `mysql`, `mariadb`, `sqlite3`, `mongo`/`mongosh`, or `redis-cli` gets SQL through `-c`, `-e`, `--eval`, positional arguments, a heredoc, or a here-string.
+
+**Escalation to deny:**
+- Any ask rule becomes deny under `sudo`, so `sudo rm -rf /var/x` is denied.
+- A database rule becomes deny when the host or connection string in the same command matches `prodPattern`, which defaults to `prod(uction)?`. That covers `-h`, `--host`, a `postgres://...` argument, or a `DATABASE_URL=...` prefix. Table names aren't checked, so `DROP TABLE products` isn't escalated.
+
+**Git is out of scope.** `git reset --hard`, `git clean`, force pushes, and `git branch -D` belong to git-workflow-guard. Covering them here too would show two prompts for one command.
+
+### Configuration
+
+Two optional files with the same format:
+
+| File | Trust | May |
+| :- | :- | :- |
+| `~/.claude/destructive-guard.json` | Trusted (yours) | Change any rule, including to `allow`; set `allow`; add `extraRules`; replace `prodPattern` |
+| `.claude/destructive-guard.json` in the repo | Untrusted (comes with a clone) | Add `extraRules` (ask or deny only); make rules **stricter**; add to `prodPattern` |
+
+```json
+{
+  "rules": { "infra.docker-prune": "allow", "fs.rm-inside-repo": "deny" },
+  "allow": ["rm -rf src/generated"],
+  "extraRules": [
+    { "id": "team.deploy-prod", "regex": "^\\./deploy\\.sh prod", "action": "deny", "reason": "deploys to production" }
+  ],
+  "prodPattern": "prod(uction)?|live"
+}
+```
+
+- `allow` holds regular expressions. Each must match a whole command, or a whole simple command within it.
+- A repo file can never loosen anything. If it tries to downgrade a rule, set `allow`, or add an `allow` extra rule, the hook ignores that entry and logs a warning. A cloned repository can't switch off your protections.
+- An invalid file is ignored as a whole, the defaults apply, and a warning goes to stderr. Run `claude --debug` to see the warning.
+- To switch the plugin off temporarily, set `DESTRUCTIVE_GUARD_DISABLE=1` in the environment Claude Code starts in.
+
+### How it combines with permission rules and other hooks
+
+- The hook runs before Claude Code's permission rules.
+- A deny exits with code 2. That stops the call even if one of your allow rules matches it.
+- An ask forces a permission prompt, even with a matching allow rule or in auto mode.
+- Your own `deny` and `ask` permission rules still apply on top. The hook never returns `allow`, so it can only add friction.
+- When several hooks answer the same call, Claude Code takes the strictest decision: deny, then defer, then ask, then allow.
 
 ## Limitations
 
