@@ -24,12 +24,18 @@ WRAPPERS = {"sudo", "doas", "env", "nohup", "time", "nice", "command", "exec", "
 WRAPPER_OPTS_WITH_VALUE = {"-u", "-g", "-n", "-C"}
 
 RM_COMMANDS = {"rm", "remove-item", "ri"}
-SYSTEM_DIRS = {
-    "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt", "/private", "/proc",
-    "/root", "/sbin", "/sys", "/usr", "/var", "/System", "/Library", "/Applications",
-    "/Users", "/home", "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
-    "C:\\Users", "C:\\ProgramData",
-}
+# Per platform: on Windows a POSIX path like /usr takes the current drive.
+if os.name == "nt":
+    SYSTEM_DIRS = {"C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+                   "C:\\ProgramData", "C:\\Users"}
+    TEMP_DIRS = [tempfile.gettempdir()]
+else:
+    SYSTEM_DIRS = {
+        "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt", "/private", "/proc",
+        "/root", "/sbin", "/sys", "/usr", "/var", "/System", "/Library", "/Applications",
+        "/Users", "/home",
+    }
+    TEMP_DIRS = [tempfile.gettempdir(), "/tmp"]
 DB_CLIENTS = {"psql", "mysql", "mariadb", "sqlite3", "mongosh", "mongo", "sqlcmd",
               "duckdb", "clickhouse-client", "cockroach", "redis-cli"}
 
@@ -195,7 +201,7 @@ def classify_target(target, cwd, project):
         return "block"
     if is_within(home, p) or is_within(project, p):
         return "block"  # home, the project root, or one of their ancestors
-    if is_within(p, project) or is_within(p, real(tempfile.gettempdir())) or is_within(p, real("/tmp")):
+    if is_within(p, project) or any(is_within(p, real(t)) for t in TEMP_DIRS):
         return None
     return "ask"  # outside the project
 

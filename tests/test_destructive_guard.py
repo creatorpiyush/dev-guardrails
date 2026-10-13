@@ -1,6 +1,8 @@
 """Tests for destructive-command-guard/hooks/destructive_guard.py."""
 import json
+import os
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -8,6 +10,11 @@ import pytest
 
 SCRIPT = (Path(__file__).resolve().parents[1] / "destructive-command-guard" / "hooks"
           / "destructive_guard.py")
+
+
+# Forward slashes: the Bash parser treats backslashes as escapes.
+SYSTEM_DIR = "C:/Windows" if os.name == "nt" else "/usr"
+TEMP_DIR = Path(tempfile.gettempdir()).as_posix()
 
 
 @pytest.fixture
@@ -42,7 +49,7 @@ def verdict(r):
     "rm -rf .",
     "rm -rf *",
     "rm -rf ..",
-    "rm -r -f /usr",
+    "rm -r -f " + SYSTEM_DIR,
     "cd .. && rm -rf repo",
     "rm --no-preserve-root -rf /x",
     "mkfs.ext4 /dev/sdb1",
@@ -97,7 +104,7 @@ def test_asks(repo, command):
     "rm -rf node_modules dist",
     "rm -rf build/*",
     "rm file.txt",
-    "rm -rf /tmp/some-build-dir",
+    "rm -rf " + TEMP_DIR + "/some-build-dir",
     'grep -r "DROP TABLE" migrations/',
     'psql -c "DELETE FROM sessions WHERE expires < now()"',
     "git reset --soft HEAD~1",
