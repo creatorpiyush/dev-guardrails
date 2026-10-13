@@ -45,6 +45,13 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 - `git commit` scans added lines of `git diff --cached`, plus `git diff` for `-a`-style commits. `RULES` holds high-confidence regexes only. Matches are redacted in messages, because stderr reaches the transcript.
 - Fake secrets in `tests/test_secret_scan.py` are built by string concatenation. Keep it that way, or this guard and GitHub push protection will flag the test file.
 
+### destructive-command-guard
+
+- `hooks/destructive_guard.py` handles Bash/PowerShell only. It splits commands with `split_segments` (adapted copy, with `escape=""` for PowerShell so Windows paths survive), follows `cd`, and strips wrappers (`sudo`, `env`, `VAR=`).
+- Recursive `rm`/`chmod`/`chown` targets go through `classify_target`. A target that is the root, a system directory, home, the project root, or an ancestor of these is blocked. A target inside the project or a temp dir is allowed. Anything else, or a target with an unexpandable `$VAR`, gets asked.
+- Everything else is regex data: `BLOCK_RULES`/`ASK_RULES` match each wrapper-stripped segment, and `PIPE_TO_SHELL`, `FORK_BOMB`, and `SQL_RULES` match the raw command, since pipes and heredocs span segments. SQL rules apply only when a segment runs a `DB_CLIENTS` binary. The rules are compiled with `re.I`, so wrap case-sensitive flags in `(?-i:...)`, as in `branch -D`.
+- The config `allow` list only downgrades an ask to an allow. Blocks are never configurable.
+
 ### Tests
 
 `tests/test_git_guard.py` runs the script as a subprocess, piping JSON payloads into `sys.executable`, against throwaway repos. The `repo` fixture creates an **unborn** repo and switches branches with `git symbolic-ref HEAD refs/heads/<name>`, so no commits or git identity are needed. Keep tests that way so they stay fast and work on Windows CI.

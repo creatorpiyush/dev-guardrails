@@ -6,6 +6,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | :- | :- |
 | [git-workflow-guard](#git-workflow-guard) | Edits, commits, and pushes on protected branches. Requires Conventional Commits and asks before every push |
 | [secret-scan-guard](#secret-scan-guard) | API keys, tokens, and private keys in tracked files and commits. Asks before staging `.env` files |
+| [destructive-command-guard](#destructive-command-guard) | `rm -rf ~`, disk wipes, git resets, database drops, infrastructure teardown, and `curl \| sh` |
 
 ## Install
 
@@ -15,6 +16,7 @@ In Claude Code:
 /plugin marketplace add creatorpiyush/dev-guardrails
 /plugin install git-workflow-guard@dev-guardrails
 /plugin install secret-scan-guard@dev-guardrails
+/plugin install destructive-command-guard@dev-guardrails
 ```
 
 Or from your shell:
@@ -23,6 +25,7 @@ Or from your shell:
 claude plugin marketplace add creatorpiyush/dev-guardrails
 claude plugin install git-workflow-guard@dev-guardrails
 claude plugin install secret-scan-guard@dev-guardrails
+claude plugin install destructive-command-guard@dev-guardrails
 ```
 
 Installing a plugin enables its hooks. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -106,6 +109,44 @@ To allow known false positives such as test fixtures, commit `.claude/secret-sca
 The plugin's skill shows Claude the safe pattern: read credentials from environment variables, keep values in a gitignored `.env`, and document names in `.env.example`. It also covers what to do when a secret was committed or pushed.
 
 Secrets written through Bash, such as `echo "$KEY" > config.py`, aren't caught at edit time. They're still caught when the file is committed.
+
+## destructive-command-guard
+
+Checks every Bash and PowerShell command. It follows `cd`, and looks through `sudo`, `env`, `nohup`, `time`, and `VAR=value` prefixes.
+
+**Blocked.** These are never right for an agent to run. Claude is told to ask you to run the command yourself.
+
+| Command | Example |
+| :- | :- |
+| Recursive `rm` / `Remove-Item -Recurse` whose target is `/`, a system directory, your home directory, the project root, or any parent of them | `rm -rf ~`, `rm -rf .` or `rm -rf *` at the project root, `rm -rf ..` |
+| `--no-preserve-root` | |
+| Disk wipes | `mkfs`, `dd of=/dev/sda`, `Format-Volume`, `diskutil eraseDisk` |
+| Recursive `chmod`/`chown` on the targets above | `chmod -R 777 /` |
+| Fork bomb | `:(){ :\|:& };:` |
+
+**Asks you first.** These are sometimes intended.
+
+| Group | Commands |
+| :- | :- |
+| Files | Recursive `rm` outside the project (temp directories are allowed) or with a variable target such as `"$DIR/"`, `find -delete`, `xargs rm`, `chmod -R 777` |
+| Git | `reset --hard`, `clean -f`, `checkout -- .`, `restore .`, `stash drop\|clear`, `branch -D`, force push |
+| Databases | `DROP`, `TRUNCATE`, and `DELETE` without `WHERE` when a DB client runs (`psql`, `mysql`, `sqlite3`, `mongosh`, ...). Also `dropdb`, `rails db:drop\|reset`, `prisma migrate reset`, `--accept-data-loss`, `manage.py flush`, `artisan migrate:fresh` |
+| Infrastructure | `terraform destroy`, `pulumi destroy`, `kubectl delete`, `helm uninstall`, `docker system\|volume prune`, `aws s3 rm --recursive`, `aws s3 rb`, `gcloud`/`az ... delete` |
+| Remote scripts | `curl\|wget ... \| sh`, `bash -c "$(curl ...)"`, `bash <(curl ...)` |
+
+The plugin's skill steers Claude to the safer path first: dry runs, `terraform plan`, `git stash` before a reset, and backups before a `DROP`.
+
+### Configuration
+
+To skip the prompt for commands you run routinely, commit `.claude/destructive-commands.json`:
+
+```json
+{
+  "allow": ["^docker system prune", "^kubectl --context kind-dev delete"]
+}
+```
+
+Each entry is a regular expression searched in each command. An allow entry only skips the prompt; it never lifts a block. If the file is invalid, the hook ignores it.
 
 ## Limitations
 
