@@ -24,11 +24,10 @@ PROTECTED_PREFIXES = ["release/", "hotfix/"]
 # A key that is present replaces the matching default list.
 CONFIG_FILE = os.path.join(".claude", "git-guard.json")
 
-CONVENTIONAL = re.compile(
-    r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
-    r"(\([^()\s]+\))?!?: \S.*$"
-)
-MAX_SUBJECT = 72
+TYPES = "feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert"
+CONVENTIONAL = re.compile(r"^(" + TYPES + r")(\([^()\s]+\))?!?: \S.*$")
+MAX_SUBJECT = 72  # longer subjects ask instead of block: the user may want one
+BRANCH_NAME = re.compile(r"^(" + TYPES + r")/[a-z0-9][a-z0-9.-]*$")
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "PowerShell"}
@@ -230,28 +229,61 @@ def check_commit(cwd, args, raw):
             "you) and commit there."
         ).format(b=branch, p=describe(rules)))
 
+    asks = []
     msg = commit_message(args, raw)
     if msg:
         subject = msg.strip().splitlines()[0].strip() if msg.strip() else ""
-        problems = []
         if not CONVENTIONAL.match(subject):
-            problems.append("subject is not a Conventional Commit")
-        if len(subject) > MAX_SUBJECT:
-            problems.append("subject is {} chars (max {})".format(len(subject), MAX_SUBJECT))
-        if problems:
             return ("block", (
-                "git-workflow-guard: commit message rejected: {why}.\n"
+                "git-workflow-guard: commit message rejected: subject is not a Conventional Commit.\n"
                 "Subject was: {s!r}\n"
-                "Required: <type>(<optional scope>)!: <description>, max {n} chars, where type is "
-                "feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert.\n"
+                "Required: <type>(<optional scope>)!: <description>, where type is {t}. "
+                "Keep it to {n} chars unless the user wants it longer.\n"
                 "Example: feat(auth): add token refresh on 401\n"
                 "Draft a compliant message, show it to the user, and commit after they approve."
-            ).format(why="; ".join(problems), s=subject, n=MAX_SUBJECT))
+            ).format(s=subject, t=TYPES, n=MAX_SUBJECT))
+        if len(subject) > MAX_SUBJECT:
+            asks.append((
+                "git-workflow-guard: the commit subject is {l} chars, over the {n}-char "
+                "convention:\n  {s}\n"
+                "Allow to keep this subject. Deny to have Claude shorten it and move the "
+                "detail into the body."
+            ).format(l=len(subject), n=MAX_SUBJECT, s=subject))
 
     if "--no-verify" in args or "-n" in args:
-        return ("ask", "git-workflow-guard: this commit uses --no-verify and skips the "
-                       "repo's git hooks. Allow it?")
+        asks.append("git-workflow-guard: this commit uses --no-verify and skips the "
+                    "repo's git hooks. Allow it?")
+    return ("ask", "\n\n".join(asks)) if asks else None
+
+
+# ---------------------------------------------------------------- new branches
+
+
+CREATE_FLAGS = {"switch": ("-c", "-C", "--create", "--force-create"), "checkout": ("-b", "-B")}
+
+
+def new_branch_name(sub, args):
+    """Name of the branch `git switch -c`, `checkout -b`, or `branch <name>` creates."""
+    if sub == "branch":  # any option means list/delete/move/etc., not a plain create
+        return args[0] if args and not any(a.startswith("-") for a in args) else None
+    flags = CREATE_FLAGS.get(sub, ())
+    for i, a in enumerate(args):
+        if a in flags and i + 1 < len(args):
+            return args[i + 1]
+        opt, eq, val = a.partition("=")
+        if eq and opt in flags and opt.startswith("--"):
+            return val
     return None
+
+
+def check_branch_name(name):
+    if BRANCH_NAME.match(name):
+        return None
+    return ("ask", (
+        "git-workflow-guard: new branch {b!r} doesn't follow <type>/<short-kebab-description> "
+        "(type is {t}), e.g. feat/csv-export.\n"
+        "Allow to keep this name. Deny to have Claude propose names that fit."
+    ).format(b=name, t=TYPES))
 
 
 def push_targets(cwd, args):
@@ -378,6 +410,9 @@ def evaluate(payload):
             r = check_commit(here, args, command)
         elif sub == "push":
             r = check_push(here, args)
+        elif sub in ("switch", "checkout", "branch"):
+            name = new_branch_name(sub, args)
+            r = check_branch_name(name) if name else None
         else:
             r = None
         if r:
