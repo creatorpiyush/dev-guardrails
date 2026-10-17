@@ -708,6 +708,17 @@ def test_utf8_output_under_non_utf8_locale(repo, monkeypatch):
     assert "b/caf\u00e9.txt" in d["text"]
 
 
+def test_host_ignores_cli_in_repo_or_cwd(repo, monkeypatch):
+    set_origin(repo, "git@github.com:o/r.git")
+    fake_cli(repo.root, "gh", 0)
+    monkeypatch.chdir(repo.root)
+    out = host(repo, repo.root)
+    assert out["cli"] is None and out["available"]["gh"] is False
+    sub = repo.root / "tools"
+    fake_cli(sub, "gh", 0)
+    assert host(repo, sub)["cli"] is None
+
+
 def test_base_strips_origin_prefix(repo):
     repo.remote()
     feature(repo, "feat: a")

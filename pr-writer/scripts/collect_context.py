@@ -506,8 +506,14 @@ def detect_host(root, path=None):
     remote_host = m.group(1).lower() if m else None
     order = ["glab", "gh"] if remote_host and "gitlab" in remote_host else ["gh", "glab"]
     available, cli, authed = {}, None, False
+    norm = lambda p: os.path.normcase(os.path.realpath(p))
+    cwd, top = norm(os.getcwd()), norm(root)
     for name in order:
         which = shutil.which(name, path=path)
+        # Windows searches the cwd first; never run a binary the repo could have planted.
+        d = norm(os.path.dirname(which)) if which else None
+        if d and (d == cwd or d == top or d.startswith(top.rstrip(os.sep) + os.sep)):
+            which = None
         available[name] = bool(which)
         if which and cli is None:
             try:
