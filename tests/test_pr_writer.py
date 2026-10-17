@@ -455,9 +455,15 @@ def test_draft_resolution(repo, flags, cfg, draft):
 
 
 def test_body_file_path(repo):
-    import tempfile
     out = on_branch(repo, "feat/a#b", "feat: a")
-    assert out["body_file"] == os.path.join(tempfile.gettempdir(), "pr-writer-feat-a-b.md")
+    second = run_script(repo.root)["body_file"]
+    for f in (out["body_file"], second):
+        d = os.path.dirname(f)
+        assert os.path.basename(f) == "body.md" and not os.path.exists(f)
+        assert os.path.isdir(d) and os.path.basename(d).startswith("pr-writer-")
+        assert os.path.dirname(d) == tempfile.gettempdir()
+        os.rmdir(d)
+    assert os.path.dirname(out["body_file"]) != os.path.dirname(second)
 
 
 # ---- templates, CODEOWNERS, host ----

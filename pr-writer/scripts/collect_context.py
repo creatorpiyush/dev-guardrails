@@ -593,8 +593,7 @@ def main(argv):
     out.update(diff=info, redactions=redactions)
     out.update(issues=issue_refs(branch, commit_list), title=suggest_title(commit_list, config),
                draft=False if ready else True if draft else config["draftByDefault"],
-               body_file=os.path.join(tempfile.gettempdir(),
-                                      "pr-writer-" + re.sub(r"[^A-Za-z0-9._-]", "-", branch) + ".md"))
+               body_file=os.path.join(tempfile.mkdtemp(prefix="pr-writer-"), "body.md"))
     found = find_templates(root)
     for t in found["templates"]:
         t["text"] = redact(t["text"], redactions)  # before the cap, so a cut can't split a secret
