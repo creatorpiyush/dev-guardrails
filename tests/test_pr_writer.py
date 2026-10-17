@@ -742,3 +742,9 @@ def test_base_strips_origin_prefix(repo):
     feature(repo, "feat: a")
     out = run_script(repo.root, "--base", "origin/main")
     assert out["base"] == {"name": "main", "ref": "origin/main", "source": "argument"}
+
+
+def test_issue_footer_trailing_punctuation(repo):
+    out = on_branch(repo, "feat/x", "feat: a\n\nCloses #4.\nRefs PROJ-7)")
+    by = {i["ref"]: i["closing"] for i in out["issues"]}
+    assert by == {"#4": True, "PROJ-7": False}

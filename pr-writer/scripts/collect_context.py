@@ -349,10 +349,11 @@ def issue_refs(branch, commits):
         for kw, val in FOOTER.findall(c["body"]):
             closing = not kw.lower().startswith("ref")
             for tok in re.split(r"[,\s]+", val):
+                tok = tok.rstrip(".,;:)")  # "Closes #4."
                 if ISSUE_TOKEN.fullmatch(tok):
                     add(tok.upper() if tok[0] != "#" else tok, "footer", closing)
                 elif tok.startswith(("http://", "https://")):
-                    add(tok.rstrip(".,;)"), "footer", closing)
+                    add(tok, "footer", closing)
         for u in ISSUE_URL.findall(c["subject"] + "\n" + c["body"]):
             add(u, "url", False)
     return list(found.values())
