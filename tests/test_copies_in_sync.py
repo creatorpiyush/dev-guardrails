@@ -14,6 +14,7 @@ PATTERNS = ROOT / "secret-scan-guard" / "hooks" / "patterns.py"
 PROTECTED_FILES = ROOT / "protected-files-guard" / "hooks" / "protected_files_guard.py"
 PR_WRITER = ROOT / "pr-writer" / "scripts" / "collect_context.py"
 TEST_BEFORE_COMMIT = ROOT / "test-before-commit" / "hooks" / "test_before_commit.py"
+HUMANIZER_SCAN = ROOT / "humanizer" / "scripts" / "scan.py"
 
 
 def definition(path, name):
@@ -56,6 +57,10 @@ def test_shell_parsing_copied_to_test_before_commit(name):
 
 def test_glob_re_copied_to_test_before_commit():
     assert definition(PROTECTED_FILES, "glob_re") == definition(TEST_BEFORE_COMMIT, "glob_re")
+
+
+def test_glob_re_copied_to_humanizer():
+    assert definition(PROTECTED_FILES, "glob_re") == definition(HUMANIZER_SCAN, "glob_re")
 
 
 @pytest.mark.parametrize("name", [
