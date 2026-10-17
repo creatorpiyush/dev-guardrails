@@ -689,6 +689,11 @@ def test_missing_base_hint_mentions_positional(repo):
     assert "Pass the base branch" in msg
 
 
+def test_quote_in_branch_warns(repo):
+    out = on_branch(repo, "feat/it's", "feat: a")
+    assert "branch or base name contains a single quote; create the PR manually" in out["warnings"]
+
+
 def test_pushed_when_upstream_is_base(repo):
     repo.remote()
     git(repo.root, "fetch", "-q", "origin")

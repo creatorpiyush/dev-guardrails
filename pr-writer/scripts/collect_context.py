@@ -563,6 +563,8 @@ def main(argv):
                     "Base branch '%s' not found." % base if base
                     else "No base branch found (tried origin/HEAD, main, master). Pass the base branch, e.g. main.",
                     warnings=warnings, repo_root=root, branch=branch, config=config)
+    if "'" in branch or "'" in base_info["name"]:  # the skill single-quotes both
+        warnings.append("branch or base name contains a single quote; create the PR manually")
     ref = base_info["ref"]
     mb = git(root, "merge-base", ref, "HEAD")
     if not mb:
