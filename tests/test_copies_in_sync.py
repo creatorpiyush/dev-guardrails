@@ -13,6 +13,7 @@ SECRET_SCAN = ROOT / "secret-scan-guard" / "hooks" / "secret_scan.py"
 PATTERNS = ROOT / "secret-scan-guard" / "hooks" / "patterns.py"
 PROTECTED_FILES = ROOT / "protected-files-guard" / "hooks" / "protected_files_guard.py"
 PR_WRITER = ROOT / "pr-writer" / "scripts" / "collect_context.py"
+TEST_BEFORE_COMMIT = ROOT / "test-before-commit" / "hooks" / "test_before_commit.py"
 
 
 def definition(path, name):
@@ -42,6 +43,19 @@ def load(path):
 ])
 def test_shell_parsing_copied_to_secret_scan(name):
     assert definition(GIT_GUARD, name) == definition(SECRET_SCAN, name)
+
+
+@pytest.mark.parametrize("name", [
+    "SEPARATOR_CHARS", "KEYWORDS", "WRAPPERS", "SHELLS", "SHELL_OPTS_WITH_VALUE", "MAX_DEPTH",
+    "GIT_OPTS_WITH_VALUE", "split_segments", "takes_separate_value", "unwrap", "nested_script",
+    "git_invocations",
+])
+def test_shell_parsing_copied_to_test_before_commit(name):
+    assert definition(GIT_GUARD, name) == definition(TEST_BEFORE_COMMIT, name)
+
+
+def test_glob_re_copied_to_test_before_commit():
+    assert definition(PROTECTED_FILES, "glob_re") == definition(TEST_BEFORE_COMMIT, "glob_re")
 
 
 @pytest.mark.parametrize("name", [
