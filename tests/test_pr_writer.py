@@ -694,6 +694,20 @@ def test_pushed_when_upstream_is_base(repo):
     assert out["pushed"] is True
 
 
+def test_utf8_output_under_non_utf8_locale(repo, monkeypatch):
+    monkeypatch.setitem(ENV, "PYTHONUTF8", "0")
+    monkeypatch.setitem(ENV, "LC_ALL", "en_US.ISO8859-1")
+    repo.on("feat/x")
+    repo.commit("feat: caf\u00e9\n\nbody caf\u00e9", {"caf\u00e9.txt": "x\n"})
+    out = run_script(repo.root)
+    c = out["commits"][0]
+    assert (c["subject"], c["body"]) == ("feat: caf\u00e9", "body caf\u00e9")
+    d = out["diff"]
+    assert [f["path"] for f in d["files"]] == ["caf\u00e9.txt"]
+    assert "caf\u00e9.txt" in d["stat"]
+    assert "b/caf\u00e9.txt" in d["text"]
+
+
 def test_base_strips_origin_prefix(repo):
     repo.remote()
     feature(repo, "feat: a")

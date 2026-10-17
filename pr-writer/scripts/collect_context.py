@@ -38,7 +38,7 @@ def git(cwd, *args):
     try:
         r = subprocess.run(
             ["git", *args], cwd=cwd, capture_output=True, text=True,
-            timeout=10, errors="replace",
+            timeout=10, encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -262,9 +262,12 @@ def check_injection(text, where, warnings):
         warnings.append(msg)
 
 
+# Unquoted UTF-8 paths in --stat and diff headers.
+DIFF = ("-c", "core.quotepath=off", "diff", "--no-color", "--no-ext-diff")
+
+
 def numstat(root, merge_base):
-    raw = git(root, "diff", "--numstat", "-z", "--no-color", "--no-ext-diff",
-              "%s..HEAD" % merge_base) or ""
+    raw = git(root, *DIFF, "--numstat", "-z", "%s..HEAD" % merge_base) or ""
     parts, files, i = raw.split("\0"), [], 0
     while i < len(parts):
         head = parts[i].split("\t", 2)
@@ -284,15 +287,15 @@ def numstat(root, merge_base):
 def diff_info(root, merge_base, cap):
     rng = "%s..HEAD" % merge_base
     files = numstat(root, merge_base)
-    stat = git(root, "diff", "--stat", "--no-color", "--no-ext-diff", rng) or ""
-    text = git(root, "diff", "--no-color", "--no-ext-diff", rng) or ""
+    stat = git(root, *DIFF, "--stat", rng) or ""
+    text = git(root, *DIFF, rng) or ""
     if len(text.encode("utf-8")) <= cap:
         return {"files": files, "stat": stat, "text": text, "truncated": False, "excerpts": []}
     top = sorted((f for f in files if not f["binary"]),
                  key=lambda f: f["added"] + f["deleted"], reverse=True)[:EXCERPT_FILES]
     excerpts = []
     for f in top:
-        d = git(root, "diff", "--no-color", "--no-ext-diff", rng, "--", f["path"]) or ""
+        d = git(root, *DIFF, rng, "--", f["path"]) or ""
         excerpts.append({"path": f["path"], "lines": "\n".join(d.splitlines()[:EXCERPT_LINES])})
     return {"files": files, "stat": stat, "text": None, "truncated": True, "excerpts": excerpts}
 
