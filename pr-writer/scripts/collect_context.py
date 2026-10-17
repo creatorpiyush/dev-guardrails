@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 # copied from git-workflow-guard/hooks/git_guard.py; keep in sync (see CLAUDE.md)
 PROTECTED = ["main", "master", "develop", "dev", "trunk", "staging", "production"]
@@ -172,15 +173,19 @@ def push_state(root, branch):
             "note": "based on the last fetch"}
 
 
-CONVENTIONAL = re.compile(r"^(\w+)(?:\(([^)]*)\))?(!)?: ")
+# copied from git-workflow-guard/hooks/git_guard.py; keep in sync (see CLAUDE.md)
+TYPES = "feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert"
+CONVENTIONAL = re.compile(r"^(" + TYPES + r")(\([^()\s]+\))?!?: \S.*$")
 BREAKING_FOOTER = re.compile(r"^BREAKING[ -]CHANGE: *(.*)$", re.M)
 
 
 def parse_commit(hash, subject, body):
     m = CONVENTIONAL.match(subject)
+    scope = m.group(2)[1:-1] if m and m.group(2) else None
+    bang = bool(m) and subject.split(": ", 1)[0].endswith("!")
     return {"hash": hash, "subject": subject, "body": body,
-            "type": m.group(1) if m else None, "scope": m.group(2) if m else None,
-            "breaking": bool(m and m.group(3)) or bool(BREAKING_FOOTER.search(body))}
+            "type": m.group(1) if m else None, "scope": scope,
+            "breaking": bang or bool(BREAKING_FOOTER.search(body))}
 
 
 COMMIT_CAP = 100
@@ -302,9 +307,73 @@ def sanitize_diff(info, counter, warnings):
         check_injection(e["lines"], "diff of " + e["path"], warnings)
 
 
+JIRA = re.compile(r"(?i)(?<![a-z0-9])([a-z][a-z0-9]+-\d+)(?![a-z0-9.])")
+FOOTER = re.compile(r"(?im)^(close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\b:?\s+(.+)$")
+ISSUE_URL = re.compile(
+    r"https?://\S+/(?:issues|pull|-/merge_requests|merge_requests|-/issues)/\d+"
+    r"|https?://\S+/browse/[A-Z][A-Z0-9]+-\d+")
+ISSUE_TOKEN = re.compile(r"#\d+|[A-Za-z][A-Za-z0-9]+-\d+")
+
+
+def issue_refs(branch, commits):
+    found = {}
+
+    def add(ref, source, closing):
+        if ref in found:
+            found[ref]["closing"] = found[ref]["closing"] or closing
+        else:
+            found[ref] = {"ref": ref, "source": source, "closing": closing}
+
+    name = branch.split("/", 1)[-1]
+    for m in JIRA.finditer(name):
+        add(m.group(1).upper(), "branch", False)
+    m = re.match(r"(\d+)(?:[-_]|$)", name)
+    if m:
+        add("#" + m.group(1), "branch", False)
+    for c in commits:
+        for kw, val in FOOTER.findall(c["body"]):
+            closing = not kw.lower().startswith("ref")
+            for tok in re.split(r"[,\s]+", val):
+                if ISSUE_TOKEN.fullmatch(tok):
+                    add(tok.upper() if tok[0] != "#" else tok, "footer", closing)
+                elif tok.startswith(("http://", "https://")):
+                    add(tok.rstrip(".,;)"), "footer", closing)
+        for u in ISSUE_URL.findall(c["subject"] + "\n" + c["body"]):
+            add(u, "url", False)
+    return list(found.values())
+
+
+def check_title(title, cfg):
+    problems = []
+    if cfg["titleFormat"] == "conventional" and not CONVENTIONAL.match(title):
+        problems.append("not a Conventional Commit: <type>(<scope>)!: <description>")
+    if len(title) > cfg["maxTitleLength"]:
+        problems.append("%d chars, over the %d-char limit" % (len(title), cfg["maxTitleLength"]))
+    return {"valid": not problems, "problems": problems}
+
+
+def suggest_title(commits, cfg):
+    if len(commits) == 1:
+        s = commits[0]["subject"]
+        return dict(suggested=s, prefix=None, is_suggestion=False, **check_title(s, cfg))
+    typed = [c for c in commits if c["type"]]
+    prefix = None
+    if typed:
+        order = TYPES.split("|")
+        counts = {}
+        for c in typed:
+            counts[c["type"]] = counts.get(c["type"], 0) + 1
+        top = min(counts, key=lambda t: (-counts[t], order.index(t)))
+        scopes = {c["scope"] for c in typed if c["type"] == top}
+        scope = "(%s)" % scopes.copy().pop() if len(scopes) == 1 and None not in scopes else ""
+        prefix = "%s%s%s: " % (top, scope, "!" if any(c["breaking"] for c in commits) else "")
+    return {"suggested": None, "prefix": prefix, "is_suggestion": True,
+            "valid": None, "problems": []}
+
+
 def main(argv):
     try:
-        base, ready, draft, check_title = parse_args(argv)
+        base, ready, draft, check_title_arg = parse_args(argv)
     except ValueError as e:
         return fail("bad-arguments", str(e))
     cwd = os.getcwd()
@@ -313,7 +382,8 @@ def main(argv):
         return fail("not-a-repo", "Not inside a git repository.")
     warnings = []
     config = load_config(root, warnings)
-    # Task 4: --check-title mode returns here, before the branch checks.
+    if check_title_arg is not None:
+        return {"ok": True, "title": check_title(check_title_arg, config), "warnings": warnings}
     branch = git(root, "symbolic-ref", "--short", "-q", "HEAD")
     if not branch:
         return fail("detached-head", "HEAD is detached. Switch to a feature branch.",
@@ -358,7 +428,11 @@ def main(argv):
     info = diff_info(root, mb, config["diffSizeCap"])
     sanitize_diff(info, redactions, warnings)
     out.update(diff=info, redactions=redactions)
-    # Tasks 4-5 fill the remaining keys here.
+    out.update(issues=issue_refs(branch, commit_list), title=suggest_title(commit_list, config),
+               draft=False if ready else True if draft else config["draftByDefault"],
+               body_file=os.path.join(tempfile.gettempdir(),
+                                      "pr-writer-" + re.sub(r"[^A-Za-z0-9._-]", "-", branch) + ".md"))
+    # Task 5 fills the remaining keys here.
     return out
 
 

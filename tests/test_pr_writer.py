@@ -330,3 +330,114 @@ def test_injection_warning(repo):
     w = run_script(repo.root)["warnings"]
     assert any(x.startswith("possible prompt injection in commit ") for x in w)
     assert "possible prompt injection in diff of y.txt" in w
+
+
+def on_branch(repo, branch, *msgs):
+    repo.on(branch)
+    for m in msgs:
+        repo.commit(m)
+    return run_script(repo.root)
+
+
+@pytest.mark.parametrize("branch,refs", [
+    ("feat/PROJ-123-x", ["PROJ-123"]),
+    ("feat/proj-9-x", ["PROJ-9"]),
+    ("fix/123-crash", ["#123"]),
+    ("123-crash", ["#123"]),
+    ("feat/sdk-3.8-x", []),
+])
+def test_issue_from_branch(repo, branch, refs):
+    out = on_branch(repo, branch, "feat: a")
+    assert [i["ref"] for i in out["issues"]] == refs
+    assert all(i["source"] == "branch" and i["closing"] is False for i in out["issues"])
+
+
+def test_issue_footer_closing_vs_refs(repo):
+    out = on_branch(repo, "feat/x", "feat: a\n\nCloses #4\nRefs #5, PROJ-7")
+    by = {i["ref"]: i for i in out["issues"]}
+    assert by["#4"] == {"ref": "#4", "source": "footer", "closing": True}
+    assert by["#5"]["closing"] is False
+    assert by["PROJ-7"]["closing"] is False
+
+
+def test_issue_closing_or_across_sources_and_dedupe(repo):
+    out = on_branch(repo, "fix/123-crash", "fix: a\n\nFixes #123")
+    assert out["issues"] == [{"ref": "#123", "source": "branch", "closing": True}]
+
+
+def test_issue_url_in_body(repo):
+    url = "https://github.com/o/r/issues/42"
+    jira = "https://example.atlassian.net/browse/ABC-5"
+    out = on_branch(repo, "feat/x", "feat: a\n\nSee %s and %s." % (url, jira))
+    assert {(i["ref"], i["source"]) for i in out["issues"]} == {(url, "url"), (jira, "url")}
+
+
+def test_title_one_commit(repo):
+    t = on_branch(repo, "feat/x", "feat(api): add x")["title"]
+    assert (t["suggested"], t["is_suggestion"], t["valid"]) == ("feat(api): add x", False, True)
+
+
+def test_title_several_commits(repo):
+    t = on_branch(repo, "feat/x", "feat(api): a", "fix(api): b", "feat(api): c")["title"]
+    assert (t["prefix"], t["suggested"], t["is_suggestion"]) == ("feat(api): ", None, True)
+
+
+def test_title_scope_dropped_when_mixed_and_tie_order(repo):
+    t = on_branch(repo, "feat/x", "fix(a): a", "feat(a): b", "feat(b): c", "wip stuff")["title"]
+    assert t["prefix"] == "feat: "
+    t = on_branch(repo, "feat/y", "fix: a", "feat: b")["title"]
+    assert t["prefix"] == "feat: "
+
+
+def test_title_no_conventional_commit(repo):
+    t = on_branch(repo, "feat/x", "one", "two")["title"]
+    assert t["prefix"] is None
+
+
+def test_title_breaking_prefix(repo):
+    t = on_branch(repo, "feat/x", "feat(api): a", "feat(api)!: b")["title"]
+    assert t["prefix"] == "feat(api)!: "
+
+
+LONG = "feat: " + "x" * 67
+
+
+@pytest.mark.parametrize("title,cfg,valid,needle", [
+    ("feat(api): ok", "{}", True, None),
+    ("Add a thing", "{}", False, "not a Conventional Commit"),
+    (LONG, "{}", False, "73 chars, over the 72-char limit"),
+    ("Add a " + "x" * 80, '{"titleFormat": "free"}', False, "over the 72-char limit"),
+    ("Add a thing", '{"titleFormat": "free"}', True, None),
+    (LONG, '{"maxTitleLength": 100}', True, None),
+])
+def test_check_title(repo, title, cfg, valid, needle):
+    write_config(repo, cfg)
+    out = run_script(repo.root, "--check-title", title)
+    assert out["ok"] is True
+    assert out["title"]["valid"] is valid
+    assert (needle is None) or any(needle in p for p in out["title"]["problems"])
+    assert len(LONG) == 73
+
+
+def test_check_title_works_on_protected_branch_not_outside_repo(repo, tmp_path):
+    assert run_script(repo.root, "--check-title", "feat: a")["ok"] is True  # on main
+    assert run_script(tmp_path, "--check-title", "x")["error"]["code"] == "not-a-repo"
+
+
+@pytest.mark.parametrize("flags,cfg,draft", [
+    ([], "{}", True),
+    ([], '{"draftByDefault": false}', False),
+    (["--ready"], "{}", False),
+    (["--draft"], '{"draftByDefault": false}', True),
+])
+def test_draft_resolution(repo, flags, cfg, draft):
+    write_config(repo, cfg)
+    repo.on("feat/x")
+    repo.commit("feat: a")
+    assert run_script(repo.root, *flags)["draft"] is draft
+
+
+def test_body_file_path(repo):
+    import tempfile
+    out = on_branch(repo, "feat/a#b", "feat: a")
+    assert out["body_file"] == os.path.join(tempfile.gettempdir(), "pr-writer-feat-a-b.md")
