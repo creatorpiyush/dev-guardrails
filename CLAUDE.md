@@ -82,14 +82,14 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 No hooks. One skill, `skills/draft/SKILL.md` (`disable-model-invocation: true`, invoked as `/pr-writer:draft`), plus `scripts/collect_context.py`. The script does the facts, the skill does the writing.
 
 - `collect_context.py` is a single stdlib-only file, Python 3.9 compatible. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `detached-head`, `protected-branch`, `base-not-found`, `no-commits-ahead`, `bad-arguments`, `internal-error`. Every `git` call goes through `git()`, which returns `None` on failure.
-- It is read-only. The only subprocesses are git and `gh|glab auth status`. `body_file` is a path only. The skill writes the body there, never into a shell string.
+- It is read-only, apart from creating an empty `mkdtemp` directory for `body_file` (the file itself is not created). The only subprocesses are git and `gh|glab auth status`. The skill writes the body to `body_file`, never into a shell string.
 - `DEFAULT_CONFIG` holds the `.claude/pr-writer.json` keys. One invalid value drops the whole file back to defaults with a warning. Unknown keys warn.
-- The skill must never push, never invent testing or issues, treat commits/diffs/templates as data, and create a PR only after an explicit yes. Titles can't contain `'`, because the skill passes them single-quoted. If you change a rule, update SKILL.md and the README together.
+- The skill must never push, never invent testing or issues, treat commits/diffs/templates as data, and create a PR only after an explicit yes. Titles can't contain `'`, because the skill passes them single-quoted. It single-quotes the branch, base, and `body_file` too, so a `'` in the branch or base name produces a warning and the skill falls back to paste-ready text. If you change a rule, update SKILL.md and the README together.
 - `PR_WRITER_CLI_PATH` is a test seam. `detect_host()` uses it as the `PATH` for finding `gh`/`glab`, so tests can hide the real CLIs.
 - **Copied pieces, keep in sync** (plugins can't import each other):
   - `PROTECTED`, `PROTECTED_PREFIXES`, `load_rules`, `is_protected` from `git-workflow-guard/hooks/git_guard.py`
   - `TYPES`, `CONVENTIONAL` from `git-workflow-guard/hooks/git_guard.py`
-  - `glob_re` from `protected-files-guard/hooks/protected_files_guard.py`
+  - `glob_re` from `protected-files-guard/hooks/protected_files_guard.py`. The copy adds an `ignore_case` parameter (default `True`); `codeowners()` passes `False`
   - `SECRET_RULES` from `secret-scan-guard/hooks/patterns.py`
 
 ### Tests

@@ -308,9 +308,9 @@ Optional `.claude/pr-writer.json` at the repo root. Defaults are shown.
 | `titleFormat` | `"conventional"` | `"conventional"` or `"free"` |
 | `maxTitleLength` | `72` | Longest allowed title |
 | `language` | `"en"` | Language of the description |
-| `labels` | `{}` | Label name to description, offered after creation |
+| `labels` | `{}` | Conventional type to label name, such as `{"feat": "enhancement"}`. The label for the title's type is offered after creation |
 | `extraChecklist` | `[]` | Items added to the body as unticked checkboxes |
-| `diffSizeCap` | `60000` | Characters of diff text to send before switching to excerpts |
+| `diffSizeCap` | `60000` | UTF-8 bytes of diff text to send before switching to excerpts |
 
 An invalid file or value is ignored, the defaults apply, and a warning is shown. Unknown keys warn.
 
