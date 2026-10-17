@@ -43,11 +43,13 @@ Stops Claude from editing, committing, or pushing on protected branches. It requ
 | :- | :- | :- |
 | Edit, Write, MultiEdit, NotebookEdit | File is in a git repo on a protected branch | **Blocked.** Claude proposes a branch name, waits for your OK, then runs `git switch -c` |
 | `git commit` | Current branch is protected | **Blocked** |
-| `git commit` | Subject isn't a Conventional Commit or is over 72 chars | **Blocked** |
+| `git commit` | Subject isn't a Conventional Commit | **Blocked** |
+| `git commit` | Subject is over 72 chars | **Asks** you, so you can keep a longer subject |
 | `git commit --no-verify` / `-n` | Any branch | **Asks** you |
 | `git push` | Target is protected (explicit refspec, `HEAD`, or the implicit current/upstream branch) | **Blocked** |
 | `git push` | Any other target | **Asks** you, listing CONTRIBUTING.md, PR/MR templates, CODEOWNERS, and commitlint config found in the repo |
 | `git push --force`, `+refspec`, `--all`, `--mirror` | Any target that isn't protected | **Asks** you, with a warning |
+| `git switch -c`, `git checkout -b`, `git branch <name>` | New name isn't `<type>/<short-kebab-description>` | **Asks** you, so you can keep your own name |
 | Anything else | | Allowed |
 
 Default protected branches: `main`, `master`, `develop`, `dev`, `trunk`, `staging`, `production`, `release/*`, `hotfix/*`, and the remote default branch (`origin/HEAD`).

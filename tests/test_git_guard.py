@@ -110,11 +110,25 @@ def test_bad_commit_message_blocked(repo):
     assert "Conventional Commit" in r.stderr
 
 
-def test_long_subject_blocked(repo):
+def test_long_subject_asks(repo):
     repo.on("feat/thing")
     r = run_hook(bash(repo, 'git commit -m "feat: ' + "x" * 80 + '"'))
-    assert r.returncode == 2
-    assert "max 72" in r.stderr
+    assert r.returncode == 0
+    kind, reason = decision(r)
+    assert kind == "ask" and "86 chars" in reason and "72-char" in reason
+
+
+def test_long_subject_and_no_verify_ask_together(repo):
+    repo.on("feat/thing")
+    r = run_hook(bash(repo, 'git commit -n -m "feat: ' + "x" * 80 + '"'))
+    kind, reason = decision(r)
+    assert kind == "ask" and "86 chars" in reason and "--no-verify" in reason
+
+
+def test_long_non_conventional_subject_still_blocked(repo):
+    repo.on("feat/thing")
+    r = run_hook(bash(repo, 'git commit -m "' + "x" * 80 + '"'))
+    assert r.returncode == 2 and "Conventional Commit" in r.stderr
 
 
 @pytest.mark.parametrize("message", [
@@ -154,6 +168,37 @@ def test_no_verify_asks(repo):
     assert r.returncode == 0
     kind, reason = decision(r)
     assert kind == "ask" and "--no-verify" in reason
+
+
+# ---------------------------------------------------------------- new branches
+
+@pytest.mark.parametrize("command", [
+    "git switch -c Thing",
+    "git switch --create=my_branch",
+    "git checkout -b feature/x",
+    "git checkout -B wip",
+    "git branch tmp",
+])
+def test_off_convention_branch_asks(repo, command):
+    r = run_hook(bash(repo, command))
+    assert r.returncode == 0
+    kind, reason = decision(r)
+    assert kind == "ask" and "<type>/<short-kebab-description>" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "git switch -c feat/csv-export",
+    "git checkout -b fix/sdk-3.8-timeout",
+    "git branch docs/readme",
+    "git switch main",
+    "git checkout -- file.txt",
+    "git branch -d old",
+    "git branch -m old new",
+    "git branch",
+])
+def test_conventional_or_non_create_branch_allowed(repo, command):
+    r = run_hook(bash(repo, command))
+    assert r.returncode == 0 and r.stdout == ""
 
 
 def test_cd_and_dash_c_followed(repo, tmp_path):

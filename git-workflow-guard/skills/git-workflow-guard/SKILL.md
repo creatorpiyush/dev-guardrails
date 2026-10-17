@@ -7,7 +7,9 @@ description: Branch, commit, and push workflow for code changes in a git repo. U
 
 The plugin's hooks enforce the hard rules: no edits, commits, or pushes on
 protected branches, Conventional Commit subjects only, and a confirmation
-prompt before every push. This skill covers the judgment around them.
+prompt before every push. Soft conventions ask the user instead of blocking:
+subjects over 72 characters and branch names outside
+`<type>/<short-kebab-description>`. This skill covers the judgment around them.
 
 **When a hook blocks a tool call, follow its message. Never work around a
 block**: don't edit files through Bash, change the hook config, use
@@ -25,9 +27,12 @@ release/*, hotfix/*, the remote default branch, or anything listed in
 1. Look for the repo's naming convention in `git branch -a` and
    CONTRIBUTING.md. Default to `<type>/<short-kebab-description>`, for example
    `feat/csv-export` or `fix/login-timeout`.
-2. Propose one name and one or two alternatives.
-3. Ask the user to confirm and wait for the answer. Don't create the branch first.
-4. Run `git switch -c <name>`.
+2. Offer the user options: one recommended name plus one or two
+   alternatives. If you have a question tool (such as AskUserQuestion), use
+   it, so the user can pick one or type their own.
+3. Wait for the answer. Don't create the branch first.
+4. Run `git switch -c <name>`. If the user chose a name outside the
+   convention, use it as given. The hook asks them to confirm it once more.
 
 ## Phase 2: Commit
 
@@ -39,7 +44,10 @@ release/*, hotfix/*, the remote default branch, or anything listed in
    - Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.
    - Add `!` and a `BREAKING CHANGE:` footer for breaking changes.
    - Body: what changed and why, wrapped at 72 characters.
-3. Show the message to the user and wait for approval.
+3. Show the message to the user and wait for approval. If the subject can't
+   fit in 72 characters without losing meaning, offer options: a shortened
+   subject with the detail moved to the body, or the longer subject as is.
+   Use the user's choice. The hook asks them to confirm a long subject.
 4. Commit with `-m` or a heredoc so the hook can read the subject:
 
    ```bash
