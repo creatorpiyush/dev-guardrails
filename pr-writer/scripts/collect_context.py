@@ -464,7 +464,7 @@ def codeowners(root, paths):
     except OSError:
         return out
     for line in lines:
-        line = line.split(" #", 1)[0].strip()
+        line = re.sub(r"\s+#.*$", "", line).strip()
         if not line or line.startswith(("#", "[", "^[")):
             continue
         pat, *own = line.split()
@@ -488,6 +488,8 @@ def codeowners(root, paths):
 
 
 def detect_host(root, path=None):
+    if path is None:
+        path = os.environ.get("PR_WRITER_CLI_PATH")  # test seam: lets tests hide real gh/glab
     url = git(root, "remote", "get-url", "origin") or ""
     m = re.match(r"^[a-z+]+://(?:[^@/]*@)?([^/:]+)", url, re.I) or re.match(r"^(?:[^@/]+@)?([^/:]+):", url)
     remote_host = m.group(1).lower() if m else None

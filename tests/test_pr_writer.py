@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,10 @@ ENV = dict(
     GIT_COMMITTER_NAME="T",
     GIT_COMMITTER_EMAIL="t@example.com",
 )
+
+# No subprocess test may ever find a real gh or glab.
+_NO_CLI = tempfile.mkdtemp(prefix="pr-writer-nocli-")
+ENV["PR_WRITER_CLI_PATH"] = _NO_CLI
 
 DEFAULTS = {
     "draftByDefault": True,
@@ -617,3 +622,31 @@ def test_host_prefers_glab_for_gitlab_remote(repo, tmp_path):
 
 def test_host_no_origin(repo, tmp_path):
     assert host(repo, tmp_path / "empty")["remote_host"] is None
+
+
+def test_codeowners_tab_comment(repo):
+    out = owners(repo, "*.py @py\t# trailing\n", ["a.py"])
+    assert out["by_file"] == {"a.py": ["@py"]}
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("ssh://git@gitlab.com:22/o/r.git", "gitlab.com"),
+    ("/tmp/bare.git", None),
+])
+def test_host_url_forms(repo, tmp_path, url, expected):
+    set_origin(repo, url)
+    assert host(repo, tmp_path / "empty")["remote_host"] == expected
+
+
+def test_main_host_with_fake_gh(repo, tmp_path, monkeypatch):
+    set_origin(repo, "git@github.com:o/r.git")
+    fake_cli(tmp_path / "bin", "gh", 0)
+    monkeypatch.setitem(ENV, "PR_WRITER_CLI_PATH", str(tmp_path / "bin"))
+    out = tpl(repo)
+    assert out["host"]["cli"] == "gh" and out["host"]["authenticated"] is True
+
+
+def test_main_host_without_cli(repo):
+    set_origin(repo, "git@github.com:o/r.git")
+    out = tpl(repo)
+    assert out["host"]["cli"] is None and out["host"]["available"] == {"gh": False, "glab": False}
