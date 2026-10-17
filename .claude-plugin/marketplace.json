@@ -25,6 +25,11 @@
       "name": "protected-files-guard",
       "source": "./protected-files-guard",
       "description": "Stops silent edits to lockfiles, .env and key files, CI config, migrations, and license files. Denies secrets, asks for the rest."
+    },
+    {
+      "name": "pr-writer",
+      "source": "./pr-writer",
+      "description": "Writes pull request and merge request titles and bodies from your branch's commits and diff, then opens the PR after you approve."
     }
   ]
 }
