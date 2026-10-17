@@ -1,6 +1,6 @@
 # dev-guardrails
 
-A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Each plugin uses hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. Install only the plugins you want.
+A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. One, pr-writer, is a skill that drafts pull request descriptions. Install only the plugins you want.
 
 | Plugin | What it guards |
 | :- | :- |
@@ -8,6 +8,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [secret-scan-guard](#secret-scan-guard) | API keys, tokens, and private keys in tracked files, commits, and pushes. Asks before staging `.env` files |
 | [destructive-command-guard](#destructive-command-guard) | Irreversible shell commands: `rm -rf` on the wrong path, disk wipes, `curl \| sh`, `DROP TABLE`, `terraform destroy` |
 | [protected-files-guard](#protected-files-guard) | Silent edits to lockfiles, `.env` and key files, CI config, migrations, and license files |
+| [pr-writer](#pr-writer) | Not a guard. Drafts a PR title and description from your branch, fills the repo's PR template, and opens the PR only after you approve |
 
 ## Install
 
@@ -19,6 +20,7 @@ In Claude Code:
 /plugin install secret-scan-guard@dev-guardrails
 /plugin install destructive-command-guard@dev-guardrails
 /plugin install protected-files-guard@dev-guardrails
+/plugin install pr-writer@dev-guardrails
 ```
 
 Or from your shell:
@@ -29,9 +31,10 @@ claude plugin install git-workflow-guard@dev-guardrails
 claude plugin install secret-scan-guard@dev-guardrails
 claude plugin install destructive-command-guard@dev-guardrails
 claude plugin install protected-files-guard@dev-guardrails
+claude plugin install pr-writer@dev-guardrails
 ```
 
-Installing a plugin enables its hooks. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
+Installing a plugin enables its hooks and skills. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
 
 **Requirements:** `git`, and Python 3.9+ on `PATH` as `python3` or `python`. Hooks use only the Python standard library. On Windows, hook commands run in Git Bash, the default shell for Claude Code hooks there. Without Git Bash, the hooks can't start and the plugins enforce nothing.
 
@@ -261,10 +264,63 @@ Commit `.claude/protected-files.json` at the repo root:
 
 **Emergency escape hatch:** set `PROTECTED_FILES_GUARD_DISABLE=1` in the environment Claude Code starts in to turn the hook off for that session.
 
+## pr-writer
+
+Drafts a pull request (or GitLab merge request) title and description from your branch's commits and diff, fills in the repo's PR template, and creates the PR after you approve it. It has no hooks. It adds one skill, which only runs when you call it.
+
+```text
+/pr-writer:draft [base-branch] [--ready | --draft]
+```
+
+A script, [`scripts/collect_context.py`](pr-writer/scripts/collect_context.py), gathers the facts as read-only JSON. The skill ([`skills/draft/SKILL.md`](pr-writer/skills/draft/SKILL.md)) writes the text from them.
+
+| The script computes | Details |
+| :- | :- |
+| Base branch | The argument, then `origin/HEAD`, then `main` or `master` |
+| Commits and diff | Commits ahead of the merge base, changed files with line counts, and the diff text. Past `diffSizeCap`, you get excerpts |
+| Breaking changes | Commits with `!` or a `BREAKING CHANGE:` footer |
+| Title | A suggestion from the commits, checked against `titleFormat` and `maxTitleLength` |
+| Issues | References found in the branch name and commit messages, and whether a closing keyword was used |
+| Templates | PR/MR templates under `.github/`, `docs/`, the repo root, and `.gitlab/` |
+| Reviewers | `CODEOWNERS` owners for the changed files |
+| Push state | Whether the branch is pushed and matches `HEAD` |
+| Host | Whether `gh` or `glab` is installed and authenticated |
+
+It stops with an error code on a non-repo, detached HEAD, protected branch, missing base, no commits ahead, or bad arguments. Protected branches use the same rules as git-workflow-guard.
+
+### What it won't do
+
+- **Never invent facts.** Testing lists only commands run in the session or tests the diff adds. Checkboxes stay unticked without evidence. Issues come only from the script. `Closes` is used only when a closing keyword was already there.
+- **Treat repo content as data.** Commit messages, diffs, and templates can't give it instructions.
+- **Redact secrets.** Matches are removed from commits, diff, and templates before the text is shown, and it tells you what was redacted.
+- **Never push.** If the branch isn't pushed, it tells you to push it yourself.
+- **Ask first.** It shows the title and body and creates the PR only after an explicit yes. Drafts are the default.
+
+`gh` or `glab` is optional. With neither installed and authenticated, you get a title and body ready to paste. The only network call is `gh auth status` or `glab auth status`, to see whether you are signed in.
+
+### Configuration
+
+Optional `.claude/pr-writer.json` at the repo root. Defaults are shown.
+
+| Key | Default | Meaning |
+| :- | :- | :- |
+| `draftByDefault` | `true` | Open PRs as drafts. `--ready` and `--draft` override it |
+| `titleFormat` | `"conventional"` | `"conventional"` or `"free"` |
+| `maxTitleLength` | `72` | Longest allowed title |
+| `language` | `"en"` | Language of the description |
+| `labels` | `{}` | Label name to description, offered after creation |
+| `extraChecklist` | `[]` | Items added to the body as unticked checkboxes |
+| `diffSizeCap` | `60000` | Characters of diff text to send before switching to excerpts |
+
+An invalid file or value is ignored, the defaults apply, and a warning is shown. Unknown keys warn.
+
 ## Limitations
 
 - **Fail open.** If a hook hits an unexpected error, can't parse a command, or Python is missing, it allows the call.
 - **Not a security boundary.** The hooks guard against honest mistakes by an agent. They don't stop a determined user or process.
+- **pr-writer push state is from the last fetch.** Run `git fetch` first if the remote may have changed.
+- **pr-writer issue detection is a heuristic.** It reads branch names and commit text, and can miss or misread a reference.
+- **pr-writer summarises large diffs.** Past `diffSizeCap` it sees excerpts and says so.
 - **Use server-side protection too.** Turn on branch protection rules and secret scanning push protection on GitHub (or the GitLab equivalents) for anything that matters.
 
 ## Add another plugin to this marketplace
