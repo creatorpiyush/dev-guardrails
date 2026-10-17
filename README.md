@@ -1,6 +1,6 @@
 # dev-guardrails
 
-A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, and humanizer edits comments and docs that read like generic AI boilerplate. Install only the plugins you want.
+A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, humanizer edits comments and docs that read like generic AI boilerplate, and test-writer writes tests in your repo's own style. Install only the plugins you want.
 
 | Plugin | What it guards |
 | :- | :- |
@@ -11,6 +11,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [test-before-commit](#test-before-commit) | Commits that fail your project's tests or lint. Opt-in per repo |
 | [pr-writer](#pr-writer) | Not a guard. Drafts a PR title and description from your branch, fills the repo's PR template, and opens the PR only after you approve |
 | [humanizer](#humanizer) | Not a guard. Flags comments and docs in your changes that read like generic AI boilerplate, and rewrites the ones you approve |
+| [test-writer](#test-writer) | Not a guard. Writes tests that match your repo's existing ones, runs them, and checks they can fail before showing you |
 
 ## Install
 
@@ -25,6 +26,7 @@ In Claude Code:
 /plugin install test-before-commit@dev-guardrails
 /plugin install pr-writer@dev-guardrails
 /plugin install humanizer@dev-guardrails
+/plugin install test-writer@dev-guardrails
 ```
 
 Or from your shell:
@@ -38,6 +40,7 @@ claude plugin install protected-files-guard@dev-guardrails
 claude plugin install test-before-commit@dev-guardrails
 claude plugin install pr-writer@dev-guardrails
 claude plugin install humanizer@dev-guardrails
+claude plugin install test-writer@dev-guardrails
 ```
 
 Installing a plugin enables its hooks and skills. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -469,6 +472,46 @@ An invalid file is ignored, the defaults apply, and the scan output carries a wa
 
 **Name clash:** Claude Code namespaces skills by plugin name, so another installed plugin also named `humanizer` (from a different marketplace) shares the `humanizer:` prefix. Keep one of them enabled.
 
+## test-writer
+
+Writes tests for existing code in the style your repo already uses, runs them, and proves they can fail before it shows you the result. It has no hooks. Call it directly, or ask Claude to "write tests for ..." and its skill picks the request up.
+
+```text
+/test-writer:write <path... | symbol | --diff <base>>
+```
+
+| Arguments | What it targets |
+| :- | :- |
+| Paths | Those files. A directory expands to its source files, minus `.gitignore` |
+| Symbol | Where a function, class, or method with that name is defined. `pkg.mod.name` uses the last part |
+| `--diff <base>` | Source files changed since the merge base with `<base>`, including uncommitted and untracked ones |
+
+A script, [`scripts/detect_tests.py`](test-writer/scripts/detect_tests.py), gathers the facts as JSON. Claude writes the tests, following [`skills/test-writer/SKILL.md`](test-writer/skills/test-writer/SKILL.md).
+
+| The script finds | Details |
+| :- | :- |
+| Framework | pytest, unittest, jest, vitest, mocha, go test, cargo test, JUnit (Maven or Gradle), rspec, phpunit, dotnet test |
+| Commands | The suite command and where it came from, in this order of trust: `package.json` scripts, `Makefile`/`justfile` targets, pytest config and `tox.ini`, CI workflow steps. Without any, the framework default, marked low confidence. Also templates for running one file or one test |
+| Conventions | For Python and JavaScript/TypeScript: test directories, file naming, test naming, fixtures, mocking libraries, assertion style, parametrization, setup and teardown, and arrange-act-assert comments, counted over up to 50 test files. Other languages report `unknown` and rely on exemplars |
+| Exemplars | The 3 nearest existing tests for each target: same stem, imports the target, names the file, mirrored path, same directory, shared imports |
+| Coverage by name | The target's public symbols, and which ones its existing tests mention |
+| Coverage tools | `pytest-cov`, `coverage.py`, `c8`, `nyc`, `@vitest/coverage-*`, jest and go built-ins, jacoco, coverlet, and any existing report file |
+| Services | Database, cache, queue, and HTTP client imports in the tests and targets, and `docker-compose` services, as a warning |
+
+It reads only tracked and untracked files that aren't gitignored, skips vendored, build, minified, and binary files, and never reads `.env`, key, or credential files, even through a symlink.
+
+### What it won't do
+
+- **Change the code under test.** It only adds or extends test files, and never weakens, skips, or deletes existing tests.
+- **Bend a test to pass.** When a new test fails because the code looks wrong, it reports a suspected bug with the real output and asks you what to do.
+- **Claim results it didn't see.** It runs new tests three times to catch flakiness, then the surrounding suite, and shows the real output.
+- **Start services.** It mocks at the boundary your tests already mock, or asks.
+- **Commit or push.**
+
+### Mutation check
+
+To prove a new test can fail, Claude breaks the code it covers and checks that the test goes red. It does this on a copy, never your working tree: `detect_tests.py --snapshot` copies your tracked and untracked files, without `.git`, into a new `test-writer-*` temp directory. Without `.git` the copy isn't a repo, so git-workflow-guard doesn't block edits there even when you are on `main`. Gitignored files such as `node_modules` and `.venv` aren't copied, so if the tests can't run in the copy, the check is skipped and the report says why. Snapshots are left in place and removed on a later run once they are a day old.
+
 ## Limitations
 
 - **Fail open.** If a hook hits an unexpected error, can't parse a command, or Python is missing, it allows the call.
@@ -477,6 +520,7 @@ An invalid file is ignored, the defaults apply, and the scan output carries a wa
 - **pr-writer issue detection is a heuristic.** It reads branch names and commit text, and can miss or misread a reference.
 - **pr-writer summarises large diffs.** Past `diffSizeCap` it sees excerpts and says so.
 - **humanizer findings are heuristics.** They miss some boilerplate and flag some fine text, which is why Claude reads each region in context and you approve every change. Its comment extraction outside Python is a lexer, not a parser, so heredocs, regex literals, and nested template strings can confuse it.
+- **test-writer detection is a heuristic.** Frameworks, commands, and conventions come from config files and regex counts, not by running anything, so it reports where each command came from and how confident it is. It reads the root `package.json` and Python config only, so monorepo packages may need you to name the command.
 - **Use server-side protection too.** Turn on branch protection rules and secret scanning push protection on GitHub (or the GitLab equivalents) for anything that matters.
 
 ## Add another plugin to this marketplace
