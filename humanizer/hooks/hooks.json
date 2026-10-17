@@ -1,0 +1,29 @@
+{
+  "description": "humanizer: optional nudge before git commit when staged comments or docs read like boilerplate (off unless commitNudge is true)",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(git *)",
+            "command": "\"$(command -v python3 || command -v python)\" \"${CLAUDE_PLUGIN_ROOT}/hooks/humanizer_nudge.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "PowerShell(git *)",
+            "command": "\"$(command -v python3 || command -v python)\" \"${CLAUDE_PLUGIN_ROOT}/hooks/humanizer_nudge.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

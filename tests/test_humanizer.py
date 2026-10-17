@@ -477,3 +477,75 @@ def test_fixture_corpus(repo, case):
     assert set(case["expect"]) <= set(ids(before))
     assert [f for f in findings(after) if f["severity"] in ("medium", "high")] == []
 
+
+# ---------------------------------------------------------------- commit nudge hook
+
+BOILERPLATE = ("# It is important to note this is a game-changer.\n"
+               "# We delve into a seamless, cutting-edge flow.\nx = 1\n")
+
+
+def run_hook(env, payload):
+    data = payload if isinstance(payload, str) else json.dumps(payload)
+    return subprocess.run([sys.executable, str(HOOK)], input=data, capture_output=True,
+                          text=True, timeout=60, env=env)
+
+
+def commit_payload(repo, command="git commit -m 'feat: x'"):
+    return {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(repo.root)}
+
+
+def stage_boilerplate(repo, cfg=None):
+    if cfg is not None:
+        repo.config(cfg)
+    repo.write("a.py", BOILERPLATE)
+    git(repo.root, "add", "a.py")
+
+
+def test_nudge_is_off_by_default(repo, env):
+    stage_boilerplate(repo)
+    r = run_hook(env, commit_payload(repo))
+    assert (r.returncode, r.stdout) == (0, "")
+
+
+def test_nudge_asks_above_threshold(repo, env):
+    stage_boilerplate(repo, {"commitNudge": True})
+    r = run_hook(env, commit_payload(repo, "cd . && git -C . commit -m 'feat: x'"))
+    assert r.returncode == 0
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "ask"
+    reason = out["permissionDecisionReason"]
+    assert "/humanizer:review --staged" in reason and "a.py:" in reason
+    assert reason.count("\n  - ") == 3  # top three only
+    assert "Don't rewrite" in out["additionalContext"]
+
+
+def test_nudge_stays_quiet_below_threshold(repo, env):
+    stage_boilerplate(repo, {"commitNudge": True, "nudgeThreshold": 50})
+    r = run_hook(env, commit_payload(repo))
+    assert (r.returncode, r.stdout) == (0, "")
+
+
+@pytest.mark.parametrize("command", ["git status", "git push origin x", "echo commit"])
+def test_nudge_ignores_other_commands(repo, env, command):
+    stage_boilerplate(repo, {"commitNudge": True})
+    r = run_hook(env, commit_payload(repo, command))
+    assert (r.returncode, r.stdout) == (0, "")
+
+
+def test_nudge_can_be_disabled(repo, env):
+    stage_boilerplate(repo, {"commitNudge": True})
+    r = run_hook(dict(env, HUMANIZER_DISABLE="1"), commit_payload(repo))
+    assert (r.returncode, r.stdout) == (0, "")
+
+
+@pytest.mark.parametrize("payload", ["not json", "", "[]", '{"tool_name": "Bash"}',
+                                     '{"tool_name": "Bash", "tool_input": {"command": 5}}'])
+def test_nudge_fails_open_on_malformed_input(env, payload):
+    r = run_hook(env, payload)
+    assert (r.returncode, r.stdout) == (0, "")
+
+
+def test_nudge_fails_open_on_timeout(repo, env):
+    stage_boilerplate(repo, {"commitNudge": True})
+    r = run_hook(dict(env, HUMANIZER_SCAN_TIMEOUT="0.001"), commit_payload(repo))
+    assert (r.returncode, r.stdout) == (0, "")
