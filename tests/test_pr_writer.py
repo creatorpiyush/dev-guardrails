@@ -138,8 +138,117 @@ def test_unknown_config_key_warns(repo):
 
 
 def test_valid_branch_has_no_error(repo):
-    repo.on("feat/x")
+    feature(repo, "feat: a")
     out = run_script(repo.root)
     assert out["ok"] is True
     assert out["branch"] == "feat/x"
     assert out["config"] == DEFAULTS
+
+
+def feature(repo, *msgs):
+    repo.on("feat/x")
+    for m in msgs:
+        repo.commit(m)
+
+
+def test_base_from_argument(repo):
+    feature(repo, "feat: a")
+    out = run_script(repo.root, "--base", "main")
+    assert out["base"] == {"name": "main", "ref": "main", "source": "argument"}
+
+
+def test_base_from_origin_head(repo):
+    repo.remote()
+    feature(repo, "feat: a")
+    out = run_script(repo.root)
+    assert out["base"] == {"name": "main", "ref": "origin/main", "source": "origin-head"}
+
+
+def test_base_fallback_without_remote(repo):
+    feature(repo, "feat: a")
+    out = run_script(repo.root)
+    assert out["base"]["source"] == "fallback"
+    assert out["base"]["ref"] == "main"
+
+
+def test_missing_base_errors(repo):
+    feature(repo, "feat: a")
+    assert run_script(repo.root, "--base", "nope")["error"]["code"] == "base-not-found"
+
+
+def test_no_commits_ahead_errors(repo):
+    repo.on("feat/x")
+    assert run_script(repo.root)["error"]["code"] == "no-commits-ahead"
+
+
+def test_merge_base_and_ahead_behind(repo):
+    feature(repo, "feat: a", "feat: b")
+    git(repo.root, "switch", "-q", "main")
+    repo.commit("chore: m")
+    git(repo.root, "switch", "-q", "feat/x")
+    out = run_script(repo.root)
+    assert (out["ahead"], out["behind"]) == (2, 1)
+    expected = subprocess.run(["git", "rev-parse", "main~1"], cwd=repo.root,
+                              capture_output=True, text=True).stdout.strip()
+    assert out["merge_base"] == expected
+
+
+def test_pushed_vs_unpushed(repo):
+    repo.remote()
+    feature(repo, "feat: a")
+    assert run_script(repo.root)["pushed"] is False
+    git(repo.root, "push", "-q", "-u", "origin", "HEAD")
+    assert run_script(repo.root)["pushed"] is True
+    repo.commit("feat: b")
+    assert run_script(repo.root)["pushed"] is False
+
+
+def test_merge_commits_excluded(repo):
+    feature(repo, "feat: a")
+    git(repo.root, "switch", "-q", "main")
+    repo.commit("chore: m", {"m.txt": "m"})
+    git(repo.root, "switch", "-q", "feat/x")
+    git(repo.root, "merge", "-q", "--no-ff", "-m", "Merge main", "main")
+    out = run_script(repo.root)
+    assert [c["subject"] for c in out["commits"]] == ["feat: a"]
+
+
+def test_commit_cap(repo):
+    repo.on("feat/x")
+    for i in range(101):
+        git(repo.root, "commit", "--allow-empty", "-q", "-m", "chore: %d" % i)
+    out = run_script(repo.root)
+    assert len(out["commits"]) == 100
+    assert out["commits_truncated"] is True
+
+
+@pytest.mark.parametrize("msg,note", [
+    ("feat!: x", None),
+    ("feat(api): x\n\nBREAKING CHANGE: y", "y"),
+])
+def test_breaking_change_detected(repo, msg, note):
+    feature(repo, msg)
+    out = run_script(repo.root)
+    assert out["commits"][0]["breaking"] is True
+    assert out["commits"][0]["type"] == "feat"
+    assert [b["note"] for b in out["breaking_changes"]] == [note]
+
+
+def test_non_conventional_commit(repo):
+    feature(repo, "Fix the thing")
+    c = run_script(repo.root)["commits"][0]
+    assert (c["type"], c["scope"], c["breaking"]) == (None, None, False)
+    assert out_empty(run_script(repo.root))
+
+
+def out_empty(out):
+    return out["breaking_changes"] == [] and out["commits_truncated"] is False
+
+
+def test_dirty_warns(repo):
+    feature(repo, "feat: a")
+    assert run_script(repo.root)["dirty"] is False
+    (repo.root / "new.txt").write_text("x")
+    out = run_script(repo.root)
+    assert out["dirty"] is True
+    assert "uncommitted changes are not included" in out["warnings"]
