@@ -348,6 +348,8 @@ def check_title(title, cfg):
     problems = []
     if cfg["titleFormat"] == "conventional" and not CONVENTIONAL.match(title):
         problems.append("not a Conventional Commit: <type>(<scope>)!: <description>")
+    if "'" in title:
+        problems.append("contains a single quote; rephrase it without one")
     if len(title) > cfg["maxTitleLength"]:
         problems.append("%d chars, over the %d-char limit" % (len(title), cfg["maxTitleLength"]))
     return {"valid": not problems, "problems": problems}

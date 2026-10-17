@@ -418,6 +418,8 @@ LONG = "feat: " + "x" * 67
     ("Add a " + "x" * 80, '{"titleFormat": "free"}', False, "over the 72-char limit"),
     ("Add a thing", '{"titleFormat": "free"}', True, None),
     (LONG, '{"maxTitleLength": 100}', True, None),
+    ("feat: don't add y", "{}", False, "single quote"),
+    ("Don't add y", '{"titleFormat": "free"}', False, "single quote"),
 ])
 def test_check_title(repo, title, cfg, valid, needle):
     write_config(repo, cfg)
@@ -426,6 +428,12 @@ def test_check_title(repo, title, cfg, valid, needle):
     assert out["title"]["valid"] is valid
     assert (needle is None) or any(needle in p for p in out["title"]["problems"])
     assert len(LONG) == 73
+
+
+def test_single_commit_subject_with_quote_is_invalid(repo):
+    out = on_branch(repo, "feat/q", "feat: don't add y")
+    assert out["title"]["valid"] is False
+    assert any("single quote" in p for p in out["title"]["problems"])
 
 
 def test_check_title_works_on_protected_branch_not_outside_repo(repo, tmp_path):

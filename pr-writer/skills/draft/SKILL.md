@@ -46,7 +46,7 @@ Never include secrets, tokens, or internal hostnames. If `redactions` is non-emp
 
 ## 6. Title
 
-- If `title.suggested` is set, use it.
+- If `title.suggested` is set and `title.valid` is true, use it. If it is set but invalid, write a new title that fixes `title.problems`.
 - If it is null (several commits), write a short description after `title.prefix`.
 - **The final title must not contain a single quote (`'`).** If a draft title has one, rephrase it without one. Titles come from commit data, so always pass them as a single-quoted argument, e.g. `'feat(x): add y'`.
 - Validate the final title: `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/collect_context.py" --check-title '<title>'`. If `title.valid` is false, fix the `title.problems` and check again.
