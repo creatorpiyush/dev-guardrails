@@ -10,9 +10,10 @@ Read the scripts before you install a plugin. Each one is standard-library Pytho
 | secret-scan-guard | `hooks/secret_scan.py` on every file edit and Bash/PowerShell call | The tool call, the edited file, `~/.claude/secret-scan.json`, `.claude/secret-scan.json`, the baseline, read-only `git diff`/`git log` output | Nothing as a hook. `secret_scan.py --baseline` writes the baseline file you ask for | None |
 | destructive-command-guard | `hooks/destructive_command_guard.py` on every Bash/PowerShell call | The tool call, `~/.claude/destructive-guard.json`, `.claude/destructive-guard.json` | Nothing | None |
 | protected-files-guard | `hooks/protected_files_guard.py` on every file edit and Bash/PowerShell call | The tool call, `.claude/protected-files.json`, read-only `git` output | Nothing | None |
+| test-before-commit | `hooks/test_before_commit.py` on every file edit and Bash/PowerShell call. On `git commit`, the commands you configured, from the repo root, without a shell unless a command sets `shell` | The tool call, `~/.claude/test-before-commit.json`, `.claude/test-before-commit.json`, the trust file, `package.json`/`pyproject.toml` for autodetect, read-only `git` output | `.git/test-before-commit-cache.json`, and `git write-tree` objects. `--trust` writes `~/.claude/test-before-commit-trust.json` | Whatever your test commands do |
 | pr-writer | `scripts/collect_context.py` when you run `/pr-writer:draft` | Read-only `git` output, `.claude/pr-writer.json`, `.claude/git-guard.json`, PR templates, `CODEOWNERS` | An empty temp directory for the PR body file. It removes its own day-old ones (named `pr-writer-*`, owned by you, holding only `body.md`) | `gh auth status` or `glab auth status`, to see whether you are signed in |
 
-Hook messages go into Claude's context, so secret-scan-guard only ever shows redacted previews, and pr-writer redacts secrets before Claude sees the diff. pr-writer never runs a `gh` or `glab` binary from inside the repository.
+Hook messages go into Claude's context, so secret-scan-guard only ever shows redacted previews, and pr-writer redacts secrets before Claude sees the diff. pr-writer never runs a `gh` or `glab` binary from inside the repository. test-before-commit puts the last 60 lines of a failing command's output into Claude's context, so keep secrets out of your test output.
 
 ## Supported versions
 

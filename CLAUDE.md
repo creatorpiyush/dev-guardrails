@@ -10,6 +10,7 @@ python -m pytest                                  # all tests
 python -m pytest tests/test_git_guard.py::test_no_verify_asks   # one test
 python -m pytest tests/test_secret_scan.py                       # one plugin's tests
 python -m pytest tests/test_pr_writer.py                         # pr-writer tests
+python -m pytest tests/test_test_before_commit.py                # test-before-commit tests
 python -m pytest -k push                          # tests matching a name
 claude plugin validate .                          # marketplace.json + every relative-path plugin
 claude plugin validate ./<plugin>                 # one plugin's manifest
@@ -93,6 +94,17 @@ No hooks. One skill, `skills/draft/SKILL.md` (`disable-model-invocation: true`, 
   - `glob_re` from `protected-files-guard/hooks/protected_files_guard.py`. The copy adds an `ignore_case` parameter (default `True`); `codeowners()` passes `False`
   - `SECRET_RULES` from `secret-scan-guard/hooks/patterns.py` (the high-confidence rules). `EXTRA_REDACTIONS` adds the `url-credentials` and `jwt` medium rules, replacing only the secret part
   - `tests/test_copies_in_sync.py` checks all of these
+
+### test-before-commit
+
+- `hooks/test_before_commit.py` follows the same contract and fail-open wrapper as `git_guard.py`. It acts only on `git commit` (found with a copy of git-workflow-guard's shell parsing block), skipping `--amend --no-edit` and merges (`MERGE_HEAD`). `--trust [dir]` is a CLI mode, not a hook path.
+- `load_settings()` merges `DEFAULTS`, the user file, then the repo file. `commands` wins over `autodetect`. An invalid file is ignored with a warning (stderr plus `systemMessage`), and the other file still applies.
+- **Trust boundary:** user-config commands run as is. When a repo config exists and there are commands, `digest` (the repo file's text plus the resolved commands) must equal the value in `~/.claude/test-before-commit-trust.json` for that repo's realpath, or the hook asks and runs nothing. Only `--trust`, via the `trust` skill (`disable-model-invocation: true`), writes that file. Shell commands mentioning the trust script, trust file, or config name ask, and so do file-tool edits of the user config or trust file. Keep it that way.
+- `run_command()` never puts `tool_input` into a command. It uses `shlex.split` and no shell unless the command sets `shell`, writes output to a temp file (not a pipe), runs each command in its own process group or session, and kills the whole tree on timeout. Total runtime is capped by `BUDGET` (1700s), under the 1800s `timeout` in `hooks.json`. Keep the two in step.
+- Failure output is the last `TAIL_LINES` lines of the last `TAIL_BYTES`, ANSI-stripped, with each line capped at `LINE_CAP`.
+- The cache (`git rev-parse --git-path test-before-commit-cache.json`) holds one passing key: `write-tree`, the unstaged `git diff --binary`, and the commands.
+- **Copied pieces, keep in sync:** the shell parsing block from `git_guard.py`, and `glob_re` from `protected_files_guard.py`, both checked by `tests/test_copies_in_sync.py`.
+- Tests set a fake `HOME`/`USERPROFILE`, stage files in an unborn repo, and run small Python scripts as the configured commands.
 
 ### Tests
 
