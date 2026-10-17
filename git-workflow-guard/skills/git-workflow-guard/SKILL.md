@@ -11,7 +11,8 @@ prompt before every push. Soft conventions ask the user instead of blocking:
 subjects over 72 characters and branch names outside
 `<type>/<short-kebab-description>`. Commands that throw away work also ask:
 `git reset --hard`, `git clean -f`, `git branch -D`, `git stash drop`/`clear`,
-`git checkout -- <path>`, and `git restore <path>`. This skill covers the
+`git checkout -- <path>`, `git checkout -f`, `git switch --discard-changes`,
+and `git restore <path>`. This skill covers the
 judgment around them.
 
 **When a hook blocks a tool call, follow its message. Never work around a

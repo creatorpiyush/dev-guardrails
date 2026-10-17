@@ -37,7 +37,7 @@ SEPARATOR_CHARS = set(";&|\n()`")
 KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"}
 # wrapper -> its options that take a separate value
 WRAPPERS = {
-    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U"},
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "--user", "--group"},
     "doas": {"-u", "-C"},
     "env": {"-u", "-C", "-S"},
     "command": set(), "builtin": set(), "nohup": set(), "exec": {"-a"},
@@ -47,6 +47,7 @@ WRAPPERS = {
     "xargs": {"-n", "-I", "-P", "-L", "-d", "-E", "-s", "-a"},
 }
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+SHELL_OPTS_WITH_VALUE = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
 MAX_DEPTH = 3  # nested bash -c / eval
 
 # git global options that take a separate value argument.
@@ -167,7 +168,9 @@ def split_segments(command):
     """Split a shell command into simple-command token lists. None if unparseable.
 
     Subshells, $(...), and backticks split commands too, so `(git push)` and
-    `echo $(git push)` are seen. Quoted text stays one token."""
+    `echo $(git push)` are seen. Each ( and ) is also kept as its own
+    one-token segment, so callers can undo a `cd` made inside a subshell.
+    Quoted text stays one token."""
     lex = shlex.shlex(command, posix=True, punctuation_chars=";&|()`")
     lex.whitespace = " \t\r"  # keep newlines as command separators
     lex.whitespace_split = True
@@ -182,11 +185,25 @@ def split_segments(command):
             if cur:
                 segments.append(cur)
             cur = []
+            segments += [[c] for c in tok if c in "()"]
         else:
             cur.append(tok)
     if cur:
         segments.append(cur)
     return segments
+
+
+def takes_separate_value(opt, opts):
+    """True when wrapper option `opt` (or the last option in a cluster like
+    -iu) takes the next argument as its value. -uroot carries its own."""
+    if opt in opts:
+        return True
+    if opt.startswith("--") or len(opt) < 3:
+        return False
+    for k, c in enumerate(opt[1:], 1):
+        if "-" + c in opts:
+            return k == len(opt) - 1
+    return False
 
 
 def unwrap(seg):
@@ -201,7 +218,7 @@ def unwrap(seg):
             break
         seg.pop(0)
         while seg and seg[0].startswith("-") and seg[0] != "--":
-            if seg.pop(0) in WRAPPERS[name] and seg:
+            if takes_separate_value(seg.pop(0), WRAPPERS[name]) and seg:
                 seg.pop(0)
         if seg and seg[0] == "--":
             seg.pop(0)
@@ -216,20 +233,30 @@ def nested_script(seg):
     if name == "eval":
         return " ".join(seg[1:])
     if name in SHELLS:
-        for k in range(1, len(seg) - 1):
+        k = 1  # only options before the script name: `bash run.sh -c x` passes -c to run.sh
+        while k < len(seg) - 1 and seg[k].startswith(("-", "+")):
             if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", seg[k]):
                 return seg[k + 1]
+            k += 2 if seg[k] in SHELL_OPTS_WITH_VALUE else 1
     return None
 
 
 def git_invocations(command, cwd, depth=0):
     """Yield (cwd, subcommand, args, -c values) for each git call.
 
-    Follows `cd`, `-C`, wrappers like sudo and env, and `bash -c` / `eval`."""
+    Follows `cd` (undone when its subshell ends), `-C`, wrappers like sudo
+    and env, and `bash -c` / `eval`."""
     segments = split_segments(command)
     if segments is None or depth > MAX_DEPTH:
         return
+    saved = []  # cwd at each open subshell
     for seg in segments:
+        if seg == ["("]:
+            saved.append(cwd)
+            continue
+        if seg == [")"]:
+            cwd = saved.pop() if saved else cwd
+            continue
         seg = unwrap(seg)
         if not seg:
             continue
@@ -390,6 +417,9 @@ def check_discard(sub, args):
         what = "`git branch -D` deletes a branch even if it isn't merged"
     elif sub == "stash" and args[:1] in (["drop"], ["clear"]):
         what = "`git stash {}` deletes stashed changes".format(args[0])
+    elif sub in ("checkout", "switch") and (
+            "--force" in args or "--discard-changes" in args or has_short_flag(args, "f")):
+        what = "`git {} --force` throws away uncommitted changes".format(sub)
     elif sub == "checkout" and (("--" in args and args[-1] != "--") or "." in args):
         what = "`git checkout -- <path>` overwrites uncommitted changes in those files"
     elif sub == "restore" and not (("--staged" in args or "-S" in args)

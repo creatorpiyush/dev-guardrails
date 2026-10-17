@@ -15,9 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pr-writer` plugin 1.0.0: `/pr-writer:draft [base-branch] [--ready | --draft]` drafts a pull request or merge request title and description from the branch's commits and diff. A read-only script collects the base, commits, diff (excerpted past `diffSizeCap`), breaking changes, issue references, PR templates, `CODEOWNERS` owners, push state, and whether `gh` or `glab` is signed in. The skill fills the repo's template, checks the title against Conventional Commits, redacts secrets, and treats commit and diff text as data. It lists only testing it can show, leaves checkboxes unticked without evidence, and never pushes. It creates the PR only after an explicit yes, as a draft by default, and gives paste-ready text when no authenticated CLI is available. Config comes from `.claude/pr-writer.json`. It has no hooks.
 - `git-workflow-guard`: creating a branch with `git switch -c`, `git checkout -b`, or `git branch <name>` asks you when the name doesn't follow `<type>/<short-kebab-description>`. The skill offers name and subject options for you to pick from.
 
-- `git-workflow-guard`: commands that throw away work ask first: `git reset --hard`, `git clean -f`, `git branch -D`, `git stash drop`/`clear`, `git checkout -- <path>`, and `git restore <path>`.
+- `git-workflow-guard`: commands that throw away work ask first: `git reset --hard`, `git clean -f`, `git branch -D`, `git stash drop`/`clear`, `git checkout -- <path>`, `git checkout -f`, `git switch -f`/`--discard-changes`, and `git restore <path>`.
 - `git-workflow-guard`: editing `.claude/git-guard.json`, or a shell command that mentions it, asks first, because it decides which branches are protected.
-- `pr-writer`: passwords in URLs and JSON Web Tokens are redacted along with the high-confidence secrets. Day-old `body_file` temp directories from earlier runs are removed.
+- `pr-writer`: passwords in URLs (including ones with a raw `@`) and JSON Web Tokens are redacted along with the high-confidence secrets. Day-old `body_file` temp directories from earlier runs are removed.
 - Tests check that the code copied between plugins stays identical.
 
 ### Changed
@@ -28,9 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `git-workflow-guard` and `secret-scan-guard`: git calls inside subshells, `$(...)`, backticks, `if`/`while` blocks, `sudo`/`env`/`command` wrappers, `bash -c`, and `eval` are now checked. Before, `(git push origin main)` got past the protected-branch block, and `env git commit` skipped the secret scan.
+- `git-workflow-guard` and `secret-scan-guard`: git calls inside subshells, `$(...)`, backticks, `if`/`while` blocks, `sudo`/`env`/`command` wrappers (including option clusters like `sudo -iu root`), `bash -c`, and `eval` are now checked. A `cd` inside a subshell no longer carries over to later commands. Before, `(git push origin main)` got past the protected-branch block, and `env git commit` skipped the secret scan.
 - `git-workflow-guard`: `-n` inside a cluster (`-nm`) and `git -c core.hooksPath=...` now ask like `--no-verify`. `git commit -unormal -m "..."` is no longer misread as `-m ormal`.
-- `protected-files-guard`: wrapper options no longer hide the command (`sudo -u root tee .env`), and `ln` and `install` targets are checked.
+- `protected-files-guard`: wrapper options and paths no longer hide the command (`sudo -iu root tee .env`, `/usr/bin/sudo tee .env`), writes inside subshells such as `(echo x > .env)` are seen, and `ln` and `install` targets are checked.
 - `pr-writer`: diff excerpts read file names literally, so a file named `[ab].txt` no longer pulls in `a.txt`.
 
 ## [1.0.0] - 2026-10-13

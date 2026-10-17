@@ -346,6 +346,14 @@ def test_url_credentials_and_jwt_redacted(repo):
     assert out["redactions"]["url-credentials"] == 1 and out["redactions"]["jwt"] == 1
 
 
+def test_url_password_with_raw_at_sign_redacted(repo):
+    repo.on("feat/x")
+    repo.commit("feat: db", {"cfg.txt": "DB=postgres://app:p@ss" + "Word9@db.internal/app\n"})
+    out = run_script(repo.root)
+    assert "Word9" not in json.dumps(out)
+    assert "postgres://app:<redacted:url-credentials>@db.internal" in out["diff"]["text"]
+
+
 def test_excerpt_paths_are_literal(repo):
     write_config(repo, '{"diffSizeCap": 500}')
     repo.on("feat/x")

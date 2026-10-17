@@ -61,11 +61,12 @@ REDIRECT_WRITE = {">", ">>", ">|", "&>", "&>>", ">&"}
 REDIRECT_READ = {"<", "<<", "<<-", "<<<", "<&"}
 # wrapper -> its options that take a separate value
 WRAPPERS = {
-    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U"},
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "--user", "--group"},
     "doas": {"-u", "-C"},
     "env": {"-u", "-C", "-S"},
     "command": set(), "builtin": set(), "nohup": set(), "time": {"-f", "-o"},
 }
+PUNCTUATION = set(";&|<>()")
 # Every non-option argument may be written or deleted.
 ALL_ARGS = {
     "rm", "unlink", "shred", "truncate", "tee", "mv",
@@ -268,8 +269,9 @@ def split_segments(command):
     """Split a shell command into simple-command token lists. None if unparseable.
 
     Adapted from git-workflow-guard: `<` and `>` are punctuation too, so
-    redirects come out as their own tokens."""
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+    redirects come out as their own tokens. Each ( and ) of a subshell is
+    kept as its own one-token segment, so a `cd` inside it can be undone."""
+    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
     lex.whitespace = " \t\r"  # keep newlines as command separators
     lex.whitespace_split = True
     lex.commenters = ""
@@ -278,13 +280,18 @@ def split_segments(command):
     except ValueError:
         return None
     segments, cur = [], []
-    for tok in tokens:
-        if tok and set(tok) <= set(";&|\n"):
-            if cur:
-                segments.append(cur)
-            cur = []
-        else:
-            cur.append(tok)
+    for raw in tokens:
+        # shlex joins neighbouring punctuation, as in `)>out` or `)&&`; split off the parens.
+        parts = re.findall(r"[()]|[^()]+", raw) if raw and set(raw) <= PUNCTUATION else [raw]
+        for tok in parts:
+            if tok in ("(", ")") or (tok and set(tok) <= set(";&|\n")):
+                if cur:
+                    segments.append(cur)
+                cur = []
+                if tok in ("(", ")"):
+                    segments.append([tok])
+            else:
+                cur.append(tok)
     if cur:
         segments.append(cur)
     return segments
@@ -352,19 +359,32 @@ def git_cwd(args, cwd):
     return cwd
 
 
+def takes_separate_value(opt, opts):
+    """True when wrapper option `opt` (or the last option in a cluster like
+    -iu) takes the next argument as its value. -uroot carries its own."""
+    if opt in opts:
+        return True
+    if opt.startswith("--") or len(opt) < 3:
+        return False
+    for k, c in enumerate(opt[1:], 1):
+        if "-" + c in opts:
+            return k == len(opt) - 1
+    return False
+
+
 def strip_wrappers(words):
     """Drop leading VAR=value and wrappers with their options, such as `sudo -u root`."""
     while words:
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
             words = words[1:]
             continue
-        name = words[0]
+        name = os.path.basename(words[0].replace("\\", "/")).lower()
         if name not in WRAPPERS:
             break
         words = words[1:]
         while words and words[0].startswith("-") and words[0] != "--":
             opt, words = words[0], words[1:]
-            if opt in WRAPPERS[name] and words:
+            if takes_separate_value(opt, WRAPPERS[name]) and words:
                 words = words[1:]
         if words and words[0] == "--":
             words = words[1:]
@@ -373,7 +393,14 @@ def strip_wrappers(words):
 
 def shell_writes(command, cwd):
     """Yield (path token, verb, cwd) for each path the command may write. Heuristic."""
+    saved = []  # cwd at each open subshell
     for seg in split_segments(command) or []:
+        if seg == ["("]:
+            saved.append(cwd)
+            continue
+        if seg == [")"]:
+            cwd = saved.pop() if saved else cwd
+            continue
         words, i = [], 0
         while i < len(seg):  # pull out redirects
             tok = seg[i]

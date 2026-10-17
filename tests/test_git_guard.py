@@ -203,6 +203,10 @@ def test_option_values_not_misread(repo, command):
     "echo $(git push origin main)",
     "echo `git push origin main`",
     "{ git push origin main; }",
+    "sudo -iu me git push origin main",
+    "sudo -uroot git push origin main",
+    "/usr/bin/sudo git push origin main",
+    'bash -o pipefail -c "git push origin main"',
 ])
 def test_wrapped_push_to_protected_blocked(repo, command):
     repo.on("feat/thing")
@@ -212,6 +216,35 @@ def test_wrapped_push_to_protected_blocked(repo, command):
 
 def test_subshell_commit_on_main_blocked(repo):
     assert run_hook(bash(repo, '(cd . && git commit -m "feat: x")')).returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    '(cd ../other); git commit -m "feat: x"',
+    "(cd ../other && git status); git push",
+    'echo $(cd ../other); git commit -m "feat: x"',
+])
+def test_cd_inside_subshell_does_not_leak(repo, command):
+    other = repo.root.parent / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+    git(other, "symbolic-ref", "HEAD", "refs/heads/feat/other")
+    r = run_hook(bash(repo, command))  # repo is on main
+    assert r.returncode == 2, command
+
+
+def test_cd_inside_subshell_applies_inside(repo):
+    other = repo.root.parent / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+    git(other, "symbolic-ref", "HEAD", "refs/heads/feat/other")
+    r = run_hook(bash(repo, '(cd ../other && git commit -m "feat: x")'))
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_dash_c_after_script_name_is_not_a_script(repo):
+    repo.on("feat/thing")
+    r = run_hook(bash(repo, 'bash ./deploy.sh -c "git push origin main"'))
+    assert r.returncode == 0 and r.stdout == ""
 
 
 # ---------------------------------------------------------------- discarded work
@@ -230,6 +263,10 @@ def test_subshell_commit_on_main_blocked(repo):
     "git checkout .",
     "git restore file.txt",
     "git restore --staged --worktree file.txt",
+    "git checkout -f feat/other",
+    "git checkout --force feat/other",
+    "git switch --discard-changes feat/other",
+    "git switch -f feat/other",
 ])
 def test_discarding_work_asks(repo, command):
     repo.on("feat/thing")

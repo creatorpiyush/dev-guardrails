@@ -235,7 +235,7 @@ SECRET_RULES = [
 # Medium-confidence secrets that secret-scan-guard only asks about, but that never
 # belong in a PR body. Only the secret part is replaced; ${VAR} and <placeholder> stay.
 EXTRA_REDACTIONS = [
-    ("url-credentials", re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@'\"]+:)(?![$<])[^/\s@'\"]+@"),
+    ("url-credentials", re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@'\"]+:)(?![$<])[^/\s'\"]+@"),
      r"\1<redacted:url-credentials>@"),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
      "<redacted:jwt>"),

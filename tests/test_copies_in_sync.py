@@ -36,8 +36,9 @@ def load(path):
 
 
 @pytest.mark.parametrize("name", [
-    "SEPARATOR_CHARS", "KEYWORDS", "WRAPPERS", "SHELLS", "MAX_DEPTH", "GIT_OPTS_WITH_VALUE",
-    "split_segments", "unwrap", "nested_script", "git_invocations",
+    "SEPARATOR_CHARS", "KEYWORDS", "WRAPPERS", "SHELLS", "SHELL_OPTS_WITH_VALUE", "MAX_DEPTH",
+    "GIT_OPTS_WITH_VALUE", "split_segments", "takes_separate_value", "unwrap", "nested_script",
+    "git_invocations",
 ])
 def test_shell_parsing_copied_to_secret_scan(name):
     assert definition(GIT_GUARD, name) == definition(SECRET_SCAN, name)
@@ -56,6 +57,11 @@ def test_secret_rules_copied_to_pr_writer():
     high = [(r.id, r.regex.pattern) for r in patterns.RULES if r.confidence == patterns.HIGH]
     copy = [(name, rx.pattern) for name, rx in load(PR_WRITER).SECRET_RULES]
     assert copy == high
+
+
+def test_wrapper_options_match_protected_files():
+    assert definition(GIT_GUARD, "takes_separate_value") == definition(
+        PROTECTED_FILES, "takes_separate_value")
 
 
 @pytest.mark.parametrize("pattern", [
