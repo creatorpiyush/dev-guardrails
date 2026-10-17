@@ -35,6 +35,11 @@
       "name": "test-before-commit",
       "source": "./test-before-commit",
       "description": "Runs your project's test and lint commands before Claude commits, and blocks the commit with the failure output until it is fixed."
+    },
+    {
+      "name": "humanizer",
+      "source": "./humanizer",
+      "description": "Flags comments and docs in your changes that read like generic AI boilerplate, and rewrites the ones you approve so they are specific and match your repo's voice."
     }
   ]
 }

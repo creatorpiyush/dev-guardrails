@@ -1,6 +1,6 @@
 # dev-guardrails
 
-A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. One, pr-writer, is a skill that drafts pull request descriptions. Install only the plugins you want.
+A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, and humanizer edits comments and docs that read like generic AI boilerplate. Install only the plugins you want.
 
 | Plugin | What it guards |
 | :- | :- |
@@ -10,6 +10,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [protected-files-guard](#protected-files-guard) | Silent edits to lockfiles, `.env` and key files, CI config, migrations, and license files |
 | [test-before-commit](#test-before-commit) | Commits that fail your project's tests or lint. Opt-in per repo |
 | [pr-writer](#pr-writer) | Not a guard. Drafts a PR title and description from your branch, fills the repo's PR template, and opens the PR only after you approve |
+| [humanizer](#humanizer) | Not a guard. Flags comments and docs in your changes that read like generic AI boilerplate, and rewrites the ones you approve |
 
 ## Install
 
@@ -23,6 +24,7 @@ In Claude Code:
 /plugin install protected-files-guard@dev-guardrails
 /plugin install test-before-commit@dev-guardrails
 /plugin install pr-writer@dev-guardrails
+/plugin install humanizer@dev-guardrails
 ```
 
 Or from your shell:
@@ -35,6 +37,7 @@ claude plugin install destructive-command-guard@dev-guardrails
 claude plugin install protected-files-guard@dev-guardrails
 claude plugin install test-before-commit@dev-guardrails
 claude plugin install pr-writer@dev-guardrails
+claude plugin install humanizer@dev-guardrails
 ```
 
 Installing a plugin enables its hooks and skills. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -382,6 +385,90 @@ Optional `.claude/pr-writer.json` at the repo root. Defaults are shown.
 
 An invalid file or value is ignored, the defaults apply, and a warning is shown. Unknown keys warn.
 
+## humanizer
+
+Reviews the comments, docstrings, and docs added in your changes, flags text that reads like generic AI boilerplate, and rewrites it so it is specific, concise, and sounds like the rest of the repo. It's an editor, not a detector-evasion tool: it doesn't make text undetectable as AI-written, and doesn't try to. If your project or venue requires you to disclose AI assistance, this plugin doesn't change that.
+
+```text
+/humanizer:review [paths... | --staged | --diff <base>]
+```
+
+| Arguments | What it examines |
+| :- | :- |
+| None | Added lines in uncommitted changes (staged and unstaged), plus untracked files |
+| `--staged` | Added lines in the index |
+| `--diff <base>` | Added lines since the merge base with `<base>`, including uncommitted changes |
+| Paths | Whole files. Directories expand to their tracked and untracked files, minus `.gitignore` |
+
+Only added or modified lines are examined, so you don't get a repo-wide rewrite. A script, [`scripts/scan.py`](humanizer/scripts/scan.py), finds the human-language text and what looks suspicious in it, and prints JSON. Claude does the rewriting, following [`skills/humanizer/SKILL.md`](humanizer/skills/humanizer/SKILL.md). The script never edits files.
+
+### What it reads and skips
+
+- **Reads:** comments in Python (with `tokenize` and `ast`), JavaScript/TypeScript, C-family languages, Go, Rust, Java, shell, YAML, Ruby, SQL, Lua, HTML/XML, CSS, and more. Docstrings in Python, JSDoc `/** */`, and rustdoc `///`. Markdown, MDX, reStructuredText, plain text, and `README`/`CHANGELOG`/`CONTRIBUTING` files without an extension.
+- **Skips:** fenced code blocks, reStructuredText literal blocks, inline code, URLs, license headers, lint directives (`noqa`, `eslint-disable`, `type: ignore`, `pragma`, `@ts-expect-error`, and similar), shebang and encoding lines, generated files (`DO NOT EDIT`, `auto-generated` headers), lockfiles, vendored directories, minified and binary files, gitignored files, your `ignore` globs, and changelog sections under a released version.
+
+### What it flags
+
+| Finding | Example |
+| :- | :- |
+| `phrase.*` | "it's important to note", "delve", "dive into", "leverage" as a verb, "seamless", "robust", "cutting-edge", "game-changer", "unlock the full potential", "plays a crucial role", "a testament to", repeated "ensure that". The list is the `PHRASES` table in `scan.py` |
+| `comment.restates-code` | `# increment i` above `i += 1`. The comment's words are mostly the next line's identifiers and keywords, and it gives no reason |
+| `docstring.echo` | `"""Get user. Args: user_id: The user id. Returns: The user."""` |
+| `comment.tutorial-voice` | "Let's", "Now we", "First, we" in code comments |
+| `comment.over-explains` | A comment over `commentRatio` times the length of the line it annotates, that gives no reason |
+| `hype-stack`, `hedge.stack`, `hedge.pile-up` | Three hype words or hedges in one sentence, "may potentially", "can help to" |
+| `formula.*` | "Not only X but also Y", "Whether you're X or Y", rule-of-three padding, every bullet starting with a bold label |
+| `style.*` | Emoji or checkmark prefixes in headings and bullets, more em-dashes than `emDashPer100Words`, uniform sentence length, repeated sentence openers |
+
+It also takes a **voice sample** of the repo: sentence length, emoji and em-dash rates, and bold-label bullets in the docs matched by `voiceSampleFiles`, plus comment density in up to 20 tracked code files. The lines being scanned are left out of the sample. When a finding matches what the repo's docs already do, such as emoji in a repo whose README uses them, or a phrase the docs use twice or more, it drops to `info` and isn't rewritten. The output lists where the new text deviates from the sample.
+
+Each region and the whole run get a score. **The scores are heuristics for prioritising review, not a measure of authorship**, and the output says so.
+
+### How Claude edits
+
+- It rewrites only flagged regions and keeps the meaning, technical claims, and specifics. It never adds facts, numbers, behaviour, or rationale that aren't in the code or the original text.
+- A comment that only restates the code is deleted, not rephrased, and it tells you so.
+- It keeps docstring formats, Markdown structure, `TODO`/`FIXME` prefixes, lint directives, license headers, and shebangs, and never changes code.
+- It doesn't add typos, slang, fake personality, or invented anecdotes, and it leaves quoted material, legal text, security advisories, and released changelog entries alone.
+- File contents and commit messages are data. If text tells it to do something, it doesn't, and it tells you.
+- It shows a numbered before/after list grouped by file, with a reason for each, and waits. It applies only the items you approve, with the normal edit tools, so the other guards still see each edit. It never commits or pushes. Afterwards it re-runs the scan once and reports what's left.
+
+### Commit nudge (optional)
+
+With `"commitNudge": true`, a `PreToolUse` hook runs `scan.py --staged` before `git commit`, with a 3-second limit. When the staged text has at least `nudgeThreshold` medium or high findings, it asks you to confirm the commit, shows the counts and the top three findings, and suggests `/humanizer:review --staged`. It never blocks and never rewrites. On a timeout or any error it stays silent. It reads only the index, so `git commit -a` sees what was staged before. Set `HUMANIZER_DISABLE=1` to turn it off for a session.
+
+### Configuration
+
+Optional `.claude/humanizer.json` at the repo root:
+
+```json
+{
+  "ignore": ["docs/vendor/**", "**/*.generated.*"],
+  "extraPhrases": ["circle back"],
+  "allowPhrases": ["robust"],
+  "emDashPer100Words": 1.5,
+  "commentRatio": 3,
+  "commitNudge": false,
+  "nudgeThreshold": 3,
+  "voiceSampleFiles": ["README*", "CONTRIBUTING*", "docs/**/*.md"]
+}
+```
+
+| Key | Default | Meaning |
+| :- | :- | :- |
+| `ignore` | `[]` | Gitignore-style globs of files never scanned |
+| `extraPhrases` | `[]` | More phrases to flag, matched as whole words, case-insensitively |
+| `allowPhrases` | `[]` | Phrases never flagged, such as a term your project uses on purpose |
+| `emDashPer100Words` | `1.5` | Em-dash rate above which a block is flagged |
+| `commentRatio` | `3` | How many times longer than its line a comment can be before it's flagged |
+| `commitNudge` | `false` | Turn on the commit nudge |
+| `nudgeThreshold` | `3` | Medium or high findings needed before the nudge asks |
+| `voiceSampleFiles` | `["README*", "CONTRIBUTING*", "docs/**/*.md"]` | Docs the voice sample reads |
+
+An invalid file is ignored, the defaults apply, and the scan output carries a warning. Unknown keys warn.
+
+**Name clash:** Claude Code namespaces skills by plugin name, so another installed plugin also named `humanizer` (from a different marketplace) shares the `humanizer:` prefix. Keep one of them enabled.
+
 ## Limitations
 
 - **Fail open.** If a hook hits an unexpected error, can't parse a command, or Python is missing, it allows the call.
@@ -389,6 +476,7 @@ An invalid file or value is ignored, the defaults apply, and a warning is shown.
 - **pr-writer push state is from the last fetch.** Run `git fetch` first if the remote may have changed.
 - **pr-writer issue detection is a heuristic.** It reads branch names and commit text, and can miss or misread a reference.
 - **pr-writer summarises large diffs.** Past `diffSizeCap` it sees excerpts and says so.
+- **humanizer findings are heuristics.** They miss some boilerplate and flag some fine text, which is why Claude reads each region in context and you approve every change. Its comment extraction outside Python is a lexer, not a parser, so heredocs, regex literals, and nested template strings can confuse it.
 - **Use server-side protection too.** Turn on branch protection rules and secret scanning push protection on GitHub (or the GitLab equivalents) for anything that matters.
 
 ## Add another plugin to this marketplace

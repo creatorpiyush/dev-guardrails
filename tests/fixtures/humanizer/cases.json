@@ -1,0 +1,14 @@
+[
+  {"name": "restating", "ext": ".py",
+   "expect": ["docstring.echo", "comment.restates-code", "comment.tutorial-voice"]},
+  {"name": "guide", "ext": ".md",
+   "expect": ["style.emoji-prefix", "phrase.fast-paced", "phrase.important-to-note",
+              "phrase.game-changer", "formula.not-only", "formula.bold-label-bullets"]},
+  {"name": "utils", "ext": ".ts",
+   "expect": ["docstring.echo", "comment.restates-code", "phrase.leverage", "phrase.seamless",
+              "phrase.cutting-edge", "hype-stack"]},
+  {"name": "deploy", "ext": ".sh",
+   "expect": ["phrase.seamless", "phrase.empower", "phrase.delve", "hedge.pile-up"]},
+  {"name": "query", "ext": ".sql",
+   "expect": ["phrase.important-to-note", "phrase.crucial-role"]}
+]

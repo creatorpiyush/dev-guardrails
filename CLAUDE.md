@@ -11,6 +11,7 @@ python -m pytest tests/test_git_guard.py::test_no_verify_asks   # one test
 python -m pytest tests/test_secret_scan.py                       # one plugin's tests
 python -m pytest tests/test_pr_writer.py                         # pr-writer tests
 python -m pytest tests/test_test_before_commit.py                # test-before-commit tests
+python -m pytest tests/test_humanizer.py                         # humanizer tests
 python -m pytest -k push                          # tests matching a name
 claude plugin validate .                          # marketplace.json + every relative-path plugin
 claude plugin validate ./<plugin>                 # one plugin's manifest
@@ -105,6 +106,19 @@ No hooks. One skill, `skills/draft/SKILL.md` (`disable-model-invocation: true`, 
 - The cache (`git rev-parse --git-path test-before-commit-cache.json`) holds one passing key: `write-tree`, the unstaged `git diff --binary`, and the commands.
 - **Copied pieces, keep in sync:** the shell parsing block from `git_guard.py`, and `glob_re` from `protected_files_guard.py`, both checked by `tests/test_copies_in_sync.py`.
 - Tests set a fake `HOME`/`USERPROFILE`, stage files in an unborn repo, and run small Python scripts as the configured commands.
+
+### humanizer
+
+No guard. `skills/review/SKILL.md` (`disable-model-invocation: true`, invoked as `/humanizer:review`) loads `skills/humanizer/SKILL.md` by path, which holds the workflow and editing rules. `scripts/scan.py` finds the text; Claude rewrites it.
+
+- `scan.py` is a single stdlib-only file, Python 3.9 compatible. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `bad-arguments`, `base-not-found`, `internal-error`. It never writes files. Every `git` call goes through `git()`, which returns `None` on failure.
+- Scope is `added_lines()` over a `-U0` diff (`--cached`, `merge-base`, or `HEAD`/the empty tree), plus untracked files. Explicit paths are scanned whole. Prose regions are cut down to their added lines. Comment and docstring regions stay whole, but line-level findings outside the added lines are dropped.
+- Extraction: `python_regions()` uses `tokenize` and `ast`. Everything else goes through `lex_comments()`, a string-aware lexer driven by the `LANGS` table. `prose_regions()` handles Markdown, rst, and txt. Directive lines are dropped before consecutive comments are merged, so a shebang doesn't take its neighbours with it.
+- Rules: `PHRASES` is the table to extend (`id`, severity, regex). The structural checks live in `Analyzer.analyze()`. Findings with a `style` tag can be downgraded to `info` by the voice sample (`SAMPLE_MIN_WORDS` words or more).
+- The hook `hooks/humanizer_nudge.py` only ever asks, never exits 2. It imports `scan` lazily for `load_config`, so a broken scanner fails open. `HUMANIZER_SCAN_TIMEOUT` is a test seam for the scan's time limit.
+- **Copied pieces, keep in sync:** the shell parsing block from `git_guard.py` (in the hook), and `glob_re` from `protected_files_guard.py` (in `scan.py`), both checked by `tests/test_copies_in_sync.py`.
+- Fixtures in `tests/fixtures/humanizer/` are before/after pairs. `cases.json` lists the finding ids each `before` file must produce. Its `after` file must have no medium or high findings.
+- The README must keep saying it is an editor, not a detector-evasion tool, and that it doesn't replace AI-disclosure requirements.
 
 ### Tests
 

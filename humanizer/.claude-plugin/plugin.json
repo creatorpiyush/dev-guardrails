@@ -1,0 +1,13 @@
+{
+  "name": "humanizer",
+  "version": "1.0.0",
+  "description": "Flags comments and docs in your changes that read like generic AI boilerplate, and rewrites the ones you approve so they are specific and match your repo's voice.",
+  "author": {
+    "name": "Piyush Anand",
+    "email": "piyushanand.1221@gmail.com"
+  },
+  "repository": "https://github.com/creatorpiyush/dev-guardrails",
+  "homepage": "https://github.com/creatorpiyush/dev-guardrails#readme",
+  "license": "MIT",
+  "keywords": ["writing", "comments", "docs", "review", "editing", "style"]
+}
