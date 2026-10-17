@@ -448,10 +448,10 @@ def main():
             unique[key] = f
     findings = list(unique.values())
 
-    for w in warnings:
-        sys.stderr.write("destructive-command-guard warning: " + w + "\n")
+    warnings = ["destructive-command-guard warning: " + w for w in dict.fromkeys(warnings)]
     denies = [f for f in findings if f.action == R.DENY]
     if denies:
+        sys.stderr.write("".join(w + "\n" for w in warnings))
         sys.stderr.write("\n".join(
             ["destructive-command-guard blocked this command."]
             + [describe(f) for f in findings]
@@ -459,14 +459,19 @@ def main():
                "Do not rephrase, split, encode, or wrap the command to get past this check. "
                "If the user really wants it, they can run it themselves in a terminal."]) + "\n")
         return 2
+    out = {}
     if findings:
-        print(json.dumps({"hookSpecificOutput": {
+        out["hookSpecificOutput"] = {
             "hookEventName": "PreToolUse",
             "permissionDecision": "ask",
             "permissionDecisionReason": "\n".join(
                 ["destructive-command-guard: this command may be irreversible."]
                 + [describe(f) for f in findings]),
-        }}))
+        }
+    if warnings:  # stderr is never shown on exit 0
+        out["systemMessage"] = "\n".join(warnings)
+    if out:
+        print(json.dumps(out))
     return 0
 
 

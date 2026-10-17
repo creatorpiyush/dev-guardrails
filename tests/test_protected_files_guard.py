@@ -208,6 +208,16 @@ def test_sed_without_inplace_allowed(repo):
     "rm -f .env",
     "truncate -s 0 .env",
     "cd config && echo x > .env",
+    "printf x | sudo -u root tee .env",
+    "env -u HOME tee .env",
+    "ln -sf /tmp/other .env",
+    "install -m 600 /tmp/other .env",
+    "printf x | sudo -iu root tee .env",
+    "printf x | /usr/bin/sudo tee .env",
+    "(echo x > .env)",
+    "(echo x)>.env",
+    "(cd config); echo x > .env",
+    "(cd config && echo x > .env)",
 ])
 def test_shell_writes_to_secrets_denied(repo, command):
     (repo / "config").mkdir()

@@ -30,18 +30,18 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 - `hooks/hooks.json` registers one script on two `PreToolUse` matchers: `Edit|Write|MultiEdit|NotebookEdit` and `Bash|PowerShell`. The command is shell form, `"$(command -v python3 || command -v python)" "${CLAUDE_PLUGIN_ROOT}/hooks/git_guard.py"`, so it falls back to `python` on Windows (Git Bash). Exec form can't do that fallback.
 - `hooks/git_guard.py` is a single stdlib-only file and must stay Python 3.9 compatible. The flow:
   1. `evaluate()` dispatches on `tool_name`.
-  2. For shell tools, `git_invocations()` tokenizes the command with `shlex` (punctuation-aware, newlines kept as separators). It splits on `&& || ; | &`, follows `cd <dir>` and `git -C <dir>`, and yields `(cwd, subcommand, args)` for each git call.
-  3. `check_edit` / `check_commit` / `check_push` each return `None`, `("block", msg)`, or `("ask", msg)`.
+  2. For shell tools, `git_invocations()` tokenizes the command with `shlex` (punctuation-aware, newlines kept as separators). It splits on `&& || ; | &`, `(`, `)`, and backticks (so subshells and `$(...)` are seen), `unwrap()` strips keywords, `VAR=`, and wrappers like `sudo -u x` and `env`, and `nested_script()` recurses into `bash -c` and `eval` (options before the script name only) up to `MAX_DEPTH`. `split_segments` also emits each `(`/`)` as a one-token segment, and `git_invocations` restores `cwd` at `)`, so a `cd` inside a subshell doesn't leak. `takes_separate_value()` handles wrapper clusters (`sudo -iu root`, but not `-uroot`). It follows `cd <dir>` and `git -C <dir>`, and yields `(cwd, subcommand, args, -c values)` for each git call. Quoted text stays one token, so `"$(git ...)"` inside double quotes isn't seen.
+  3. `check_edit` / `check_commit` / `check_push` / `check_branch_name` / `check_discard` each return `None`, `("block", msg)`, or `("ask", msg)`. `check_discard` asks on `reset --hard`, `clean -f`, `branch -D`, `checkout -f` / `switch -f|--discard-changes`, `stash drop|clear`, `checkout -- <path>`, and `restore`. Editing `.claude/git-guard.json`, or a shell command mentioning it, asks.
   4. `main()` aggregates the results. Any block exits 2 with the messages on stderr, which Claude reads as the denial reason. Otherwise any ask prints `hookSpecificOutput.permissionDecision: "ask"` JSON on stdout and exits 0. Otherwise it exits 0 silently.
 - **Fail-open is a design requirement.** The `__main__` wrapper turns any exception into exit 0. Unparseable input (bad JSON, unbalanced quotes, `-m "$VAR"`, `-F file`) means allow, not block. Every `git` call goes through `git()`, which returns `None` on failure.
 - Protected-branch rules live in `load_rules()`: the module constants `PROTECTED` and `PROTECTED_PREFIXES`, an optional per-repo `.claude/git-guard.json` (each key present replaces its default list, and an invalid file falls back to the defaults entirely), plus the `origin/HEAD` target, which is always added.
-- Commit subjects come from the first `-m`/`--message`/`-F -`/short-option cluster (`-am`). Heredocs are extracted with the `HEREDOC` regex, from inside the `-m` value or from the raw command for `-F -`.
+- Commit subjects come from the first `-m`/`--message`/`-F -`/short-option cluster (`-am`). `commit_cluster()` splits a cluster at the first letter that takes a value (`COMMIT_VALUE_LETTERS`, `COMMIT_ATTACHED_LETTERS`), so `-nm` is `-n` plus `-m` and `-unormal` has no `-m`. `skips_hooks()` uses it for `-n`, and also catches `-c core.hooksPath=...`. Heredocs are extracted with the `HEREDOC` regex, from inside the `-m` value or from the raw command for `-F -`.
 - Push targets include explicit refspec destinations (`src:dst`, `+` = force, `HEAD` → current branch, `refs/heads/` stripped). With no refspec, the targets are the current branch and its upstream's branch name.
 - `skills/git-workflow-guard/SKILL.md` is model-facing guidance: confirm the branch name, then the commit message, then the pre-push checklist and PR body. Hook block messages also instruct Claude. If you change a rule, update the hook messages, the SKILL.md, and the README table together.
 
 ### secret-scan-guard
 
-- `hooks/secret_scan.py` follows the same contract and fail-open wrapper as `git_guard.py`. `split_segments` and `git_invocations` are **copied** from `git_guard.py`, because plugins install separately and can't import each other. When you fix parsing in one, fix the other.
+- `hooks/secret_scan.py` follows the same contract and fail-open wrapper as `git_guard.py`. The shell parsing block (`SEPARATOR_CHARS`, `KEYWORDS`, `WRAPPERS`, `SHELLS`, `MAX_DEPTH`, `split_segments`, `unwrap`, `nested_script`, `git_invocations`) is **copied** from `git_guard.py`, because plugins install separately and can't import each other. When you fix parsing in one, fix the other. `tests/test_copies_in_sync.py` fails if they drift.
 - `hooks/patterns.py` holds the rule table: `Rule(id, regex, confidence, show, value)`. `high` blocks, `medium` asks. `show` caps how many leading characters a preview reveals (the provider prefix, 4 at most). `value(match, lines, i)` extracts the secret or drops the match (the entropy and AWS-context checks). Placeholder, integrity-hash, and skip-file lists live there too.
 - `scan()` works on `(line number, text, added)` tuples, so edits and diffs share one path. Only added lines produce findings, and context lines feed the AWS-context check. Diffs are read with `-U3`.
 - Edits are scanned only when the file would be committed. Files outside a repo, and files that `git check-ignore` reports as ignored, are skipped. Only the new text is scanned (`content`, `new_string`, each `edits[].new_string`, `new_source`).
@@ -65,6 +65,7 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
   If tokenising fails, only the `FALLBACK` regexes run.
 - `decide()` applies the configured action, then the allow regexes, then escalation: ask becomes deny under `sudo`, or for `db.*` rules when a connection string matches `prodPattern`. Connection strings come from `rules.db_parts()`, never from SQL text.
 - Trust boundary in `resolve_settings()`: the user file (`~/.claude/destructive-guard.json`) can do anything. The repo file can only tighten rules, add rules, and add prod patterns. Every loosening attempt is ignored with a warning. Keep it that way.
+- Warnings go to `systemMessage` on exit 0 and to stderr on a deny, like secret-scan-guard.
 - Git commands are deliberately out of scope (git-workflow-guard owns them).
 - Tests set a fake `HOME`/`USERPROFILE` per test, so the real user config never applies.
 
@@ -73,7 +74,7 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 - `hooks/protected_files_guard.py` follows the same contract and fail-open wrapper as `git_guard.py`. Rules are `(patterns, action, reason)` in `DEFAULT_RULES`, with `DEFAULT_ALLOW` for `.env.example` and friends. `deny` exits 2, `ask` prompts.
 - `glob_re()` converts gitignore-style globs to regex: no `/` matches the name at any depth, a `/` anchors at the repo root, `**/` is zero or more directories. Matching is case-insensitive. Don't swap it for `fnmatch`, which gets `**` wrong.
 - File tools: `targets_for()` checks the path as named (parent dir realpath'd) and its full `realpath`, each relative to its own repo root. Paths outside a repo are allowed.
-- Shell tools: `split_segments` is adapted from `git_guard.py` with `<>` added as punctuation, so redirects are tokens. `shell_writes()` is a heuristic over redirects, `tee`, `sed -i`, `cp`, `mv`, `rm`, `truncate`, `git checkout --`, `git restore`, and PowerShell write cmdlets. Directory targets expand to their tracked files via `git ls-files`. Keep the README clear that it can be bypassed.
+- Shell tools: `split_segments` is adapted from `git_guard.py` with `<>` added as punctuation, so redirects are tokens. `strip_wrappers()` drops `VAR=` and wrappers (by basename) with their option values (`sudo -u root`), using a copy of `takes_separate_value()`. Parens are kept as segments and `shell_writes()` restores `cwd` at `)`, as in git-workflow-guard. `shell_writes()` is a heuristic over redirects, `tee`, `sed -i`, `cp`, `mv`, `ln`, `install`, `rm`, `truncate`, `git checkout --`, `git restore`, and PowerShell write cmdlets. Directory targets expand to their tracked files via `git ls-files`. Keep the README clear that it can be bypassed.
 - `.claude/protected-files.json` (repo) adds `rules` and `allow`, and `replaceDefaults` drops the defaults. Edits to that file always ask, regardless of config. Invalid config falls back to defaults with a warning on stderr plus `systemMessage` (stderr isn't shown on exit 0).
 - `PROTECTED_FILES_GUARD_DISABLE=1` turns it off.
 
@@ -82,7 +83,7 @@ There are two halves, and keep them separate: **hooks enforce, the skill handles
 No hooks. One skill, `skills/draft/SKILL.md` (`disable-model-invocation: true`, invoked as `/pr-writer:draft`), plus `scripts/collect_context.py`. The script does the facts, the skill does the writing.
 
 - `collect_context.py` is a single stdlib-only file, Python 3.9 compatible. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `detached-head`, `protected-branch`, `base-not-found`, `no-commits-ahead`, `bad-arguments`, `internal-error`. Every `git` call goes through `git()`, which returns `None` on failure.
-- It is read-only, apart from creating an empty `mkdtemp` directory for `body_file` (the file itself is not created). The only subprocesses are git and `gh|glab auth status`. The skill writes the body to `body_file`, never into a shell string.
+- It is read-only, apart from creating an empty `mkdtemp` directory for `body_file` (the file itself is not created) and `sweep_body_dirs()`, which removes this user's `pr-writer-*` temp directories that are over a day old and hold nothing but `body.md`. The only subprocesses are git and `gh|glab auth status`. The skill writes the body to `body_file`, never into a shell string.
 - `DEFAULT_CONFIG` holds the `.claude/pr-writer.json` keys. One invalid value drops the whole file back to defaults with a warning. Unknown keys warn.
 - The skill must never push, never invent testing or issues, treat commits/diffs/templates as data, and create a PR only after an explicit yes. Titles can't contain `'`, because the skill passes them single-quoted. It single-quotes the branch, base, and `body_file` too, so a `'` in the branch or base name produces a warning and the skill falls back to paste-ready text. If you change a rule, update SKILL.md and the README together.
 - `PR_WRITER_CLI_PATH` is a test seam. `detect_host()` uses it as the `PATH` for finding `gh`/`glab`, so tests can hide the real CLIs.
@@ -90,7 +91,8 @@ No hooks. One skill, `skills/draft/SKILL.md` (`disable-model-invocation: true`, 
   - `PROTECTED`, `PROTECTED_PREFIXES`, `load_rules`, `is_protected` from `git-workflow-guard/hooks/git_guard.py`
   - `TYPES`, `CONVENTIONAL` from `git-workflow-guard/hooks/git_guard.py`
   - `glob_re` from `protected-files-guard/hooks/protected_files_guard.py`. The copy adds an `ignore_case` parameter (default `True`); `codeowners()` passes `False`
-  - `SECRET_RULES` from `secret-scan-guard/hooks/patterns.py`
+  - `SECRET_RULES` from `secret-scan-guard/hooks/patterns.py` (the high-confidence rules). `EXTRA_REDACTIONS` adds the `url-credentials` and `jwt` medium rules, replacing only the secret part
+  - `tests/test_copies_in_sync.py` checks all of these
 
 ### Tests
 

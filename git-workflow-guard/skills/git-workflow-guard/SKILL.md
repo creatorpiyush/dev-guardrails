@@ -9,12 +9,21 @@ The plugin's hooks enforce the hard rules: no edits, commits, or pushes on
 protected branches, Conventional Commit subjects only, and a confirmation
 prompt before every push. Soft conventions ask the user instead of blocking:
 subjects over 72 characters and branch names outside
-`<type>/<short-kebab-description>`. This skill covers the judgment around them.
+`<type>/<short-kebab-description>`. Commands that throw away work also ask:
+`git reset --hard`, `git clean -f`, `git branch -D`, `git stash drop`/`clear`,
+`git checkout -- <path>`, `git checkout -f`, `git switch --discard-changes`,
+and `git restore <path>`. This skill covers the
+judgment around them.
 
 **When a hook blocks a tool call, follow its message. Never work around a
 block**: don't edit files through Bash, change the hook config, use
-`--no-verify`, or change `git` flags to get past it. If the rule seems wrong
-for this repo, tell the user and let them change `.claude/git-guard.json`.
+`--no-verify` or `-c core.hooksPath`, wrap git in `bash -c`, a subshell, or
+`sudo`, or change `git` flags to get past it. If the rule seems wrong for
+this repo, tell the user and let them change `.claude/git-guard.json`.
+
+Before a command that discards work, run `git status` (and `git stash list`
+or `git log` for branches and stashes), tell the user what would be lost,
+and prefer a recoverable option such as `git stash` or a backup branch.
 
 ## Phase 1: Branch
 

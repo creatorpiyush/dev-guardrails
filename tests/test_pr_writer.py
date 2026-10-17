@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -327,6 +328,67 @@ def test_secret_redacted(repo):
     out = json.loads(r.stdout)
     assert out["redactions"].get("github-token", 0) >= 2
     assert "<redacted:github-token>" in out["diff"]["text"]
+
+
+def test_url_credentials_and_jwt_redacted(repo):
+    password = "hunter2" + "Secret9"
+    jwt = "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiIxMjM0NTYifQ" + ".abcdefghijklmnop"
+    content = "DB=postgres://app:%s@db.internal/app\nTOKEN=%s\nOK=postgres://app:${DB_PASS}@db\n" % (
+        password, jwt)
+    repo.on("feat/x")
+    repo.commit("feat: db", {"cfg.txt": content})
+    r = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo.root, capture_output=True,
+                       text=True, env=ENV)
+    assert password not in r.stdout and jwt not in r.stdout
+    out = json.loads(r.stdout)
+    assert "postgres://app:<redacted:url-credentials>@db.internal" in out["diff"]["text"]
+    assert "${DB_PASS}@db" in out["diff"]["text"]  # placeholders stay
+    assert out["redactions"]["url-credentials"] == 1 and out["redactions"]["jwt"] == 1
+
+
+def test_url_password_with_raw_at_sign_redacted(repo):
+    repo.on("feat/x")
+    repo.commit("feat: db", {"cfg.txt": "DB=postgres://app:p@ss" + "Word9@db.internal/app\n"})
+    out = run_script(repo.root)
+    assert "Word9" not in json.dumps(out)
+    assert "postgres://app:<redacted:url-credentials>@db.internal" in out["diff"]["text"]
+
+
+def test_excerpt_paths_are_literal(repo):
+    write_config(repo, '{"diffSizeCap": 500}')
+    repo.on("feat/x")
+    repo.commit("feat: files", {"[ab].txt": "".join("x %d\n" % i for i in range(200)),
+                                "a.txt": "other\n"})
+    excerpts = run_script(repo.root)["diff"]["excerpts"]
+    glob_like = next(e for e in excerpts if e["path"] == "[ab].txt")
+    assert "b/a.txt" not in glob_like["lines"]
+
+
+def test_stale_body_dirs_swept(repo, tmp_path):
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    old = time.time() - 3 * 24 * 3600
+    dirs = {}
+    for name, files, stale in [("pr-writer-old", ["body.md"], True), ("pr-writer-empty", [], True),
+                               ("pr-writer-new", ["body.md"], False),
+                               ("pr-writer-busy", ["body.md", "x.txt"], True),
+                               ("other-old", ["body.md"], True)]:
+        d = tmp / name
+        d.mkdir()
+        for f in files:
+            (d / f).write_text("x")
+        if stale:
+            os.utime(d, (old, old))
+        dirs[name] = d
+    repo.on("feat/x")
+    repo.commit("feat: x")
+    env = dict(ENV, TMPDIR=str(tmp), TEMP=str(tmp), TMP=str(tmp))
+    r = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo.root, capture_output=True,
+                       text=True, env=env)
+    assert json.loads(r.stdout)["body_file"].startswith(str(tmp))
+    assert not dirs["pr-writer-old"].exists() and not dirs["pr-writer-empty"].exists()
+    assert dirs["pr-writer-new"].exists() and dirs["pr-writer-busy"].exists()
+    assert dirs["other-old"].exists()
 
 
 def test_injection_warning(repo):

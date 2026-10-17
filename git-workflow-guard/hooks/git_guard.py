@@ -31,11 +31,36 @@ BRANCH_NAME = re.compile(r"^(" + TYPES + r")/[a-z0-9][a-z0-9.-]*$")
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "PowerShell"}
-SHELL_OPERATORS = {"&&", "||", ";", "|", "&", "\n"}
+# Tokens made only of these split commands: operators, newlines, ( ) of
+# subshells and $(...), and backticks.
+SEPARATOR_CHARS = set(";&|\n()`")
+KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"}
+# wrapper -> its options that take a separate value
+WRAPPERS = {
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "--user", "--group"},
+    "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S"},
+    "command": set(), "builtin": set(), "nohup": set(), "exec": {"-a"},
+    "time": {"-f", "-o"},
+    "nice": {"-n"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "xargs": {"-n", "-I", "-P", "-L", "-d", "-E", "-s", "-a"},
+}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+SHELL_OPTS_WITH_VALUE = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+MAX_DEPTH = 3  # nested bash -c / eval
 
 # git global options that take a separate value argument.
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 PUSH_OPTS_WITH_VALUE = {"--repo", "-o", "--push-option", "--receive-pack", "--exec"}
+# git commit short options: these take a value (-m msg, -F file, -C/-c commit,
+# -t template), and -S[keyid] / -u[mode] take only an attached one.
+COMMIT_VALUE_LETTERS = "mFCct"
+COMMIT_ATTACHED_LETTERS = "Su"
+COMMIT_LONG_WITH_VALUE = {
+    "--message", "--file", "--author", "--date", "--template", "--reuse-message",
+    "--reedit-message", "--fixup", "--squash", "--cleanup", "--trailer",
+}
 
 
 def git(cwd, *args):
@@ -97,6 +122,14 @@ def describe(rules):
 # ---------------------------------------------------------------- edits
 
 
+CONFIG_ASK = ("git-workflow-guard: {} sets which branches are protected. "
+              "Confirm with the user before changing it.")
+
+
+def real(path):
+    return os.path.normcase(os.path.realpath(path))
+
+
 def check_edit(tool_input):
     path = tool_input.get("file_path") or tool_input.get("notebook_path")
     if not path:
@@ -108,11 +141,13 @@ def check_edit(tool_input):
             return None
         d = parent
     root = repo_root(d)
-    branch = current_branch(d) if root else None
-    if not branch:
+    if not root:
         return None
+    branch = current_branch(d)
     rules = load_rules(root)
-    if not is_protected(branch, rules):
+    if not branch or not is_protected(branch, rules):
+        if real(path) == real(os.path.join(root, CONFIG_FILE)):
+            return ("ask", CONFIG_ASK.format(CONFIG_FILE))
         return None
     return ("block", (
         "git-workflow-guard: '{b}' is a protected branch ({p}); editing files on it is blocked.\n"
@@ -130,8 +165,13 @@ def check_edit(tool_input):
 
 
 def split_segments(command):
-    """Split a shell command into simple-command token lists. None if unparseable."""
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+    """Split a shell command into simple-command token lists. None if unparseable.
+
+    Subshells, $(...), and backticks split commands too, so `(git push)` and
+    `echo $(git push)` are seen. Each ( and ) is also kept as its own
+    one-token segment, so callers can undo a `cd` made inside a subshell.
+    Quoted text stays one token."""
+    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|()`")
     lex.whitespace = " \t\r"  # keep newlines as command separators
     lex.whitespace_split = True
     lex.commenters = ""
@@ -141,10 +181,11 @@ def split_segments(command):
         return None
     segments, cur = [], []
     for tok in tokens:
-        if tok in SHELL_OPERATORS or set(tok) <= set(";&|\n"):
+        if tok and set(tok) <= SEPARATOR_CHARS:
             if cur:
                 segments.append(cur)
             cur = []
+            segments += [[c] for c in tok if c in "()"]
         else:
             cur.append(tok)
     if cur:
@@ -152,35 +193,134 @@ def split_segments(command):
     return segments
 
 
-def git_invocations(command, cwd):
-    """Yield (cwd, subcommand, args) for each git call; follows `cd` and `-C`."""
+def takes_separate_value(opt, opts):
+    """True when wrapper option `opt` (or the last option in a cluster like
+    -iu) takes the next argument as its value. -uroot carries its own."""
+    if opt in opts:
+        return True
+    if opt.startswith("--") or len(opt) < 3:
+        return False
+    for k, c in enumerate(opt[1:], 1):
+        if "-" + c in opts:
+            return k == len(opt) - 1
+    return False
+
+
+def unwrap(seg):
+    """Strip leading VAR=value, shell keywords, and wrappers such as sudo or env."""
+    seg = list(seg)
+    while seg:
+        if seg[0] in KEYWORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[0]):
+            seg.pop(0)
+            continue
+        name = os.path.basename(seg[0])
+        if name not in WRAPPERS:
+            break
+        seg.pop(0)
+        while seg and seg[0].startswith("-") and seg[0] != "--":
+            if takes_separate_value(seg.pop(0), WRAPPERS[name]) and seg:
+                seg.pop(0)
+        if seg and seg[0] == "--":
+            seg.pop(0)
+        if name == "timeout" and seg:
+            seg.pop(0)  # the duration
+    return seg
+
+
+def nested_script(seg):
+    """The script `bash -c '...'` or `eval ...` runs, else None."""
+    name = os.path.basename(seg[0]).lower()
+    if name == "eval":
+        return " ".join(seg[1:])
+    if name in SHELLS:
+        k = 1  # only options before the script name: `bash run.sh -c x` passes -c to run.sh
+        while k < len(seg) - 1 and seg[k].startswith(("-", "+")):
+            if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", seg[k]):
+                return seg[k + 1]
+            k += 2 if seg[k] in SHELL_OPTS_WITH_VALUE else 1
+    return None
+
+
+def git_invocations(command, cwd, depth=0):
+    """Yield (cwd, subcommand, args, -c values) for each git call.
+
+    Follows `cd` (undone when its subshell ends), `-C`, wrappers like sudo
+    and env, and `bash -c` / `eval`."""
     segments = split_segments(command)
-    if segments is None:
+    if segments is None or depth > MAX_DEPTH:
         return
+    saved = []  # cwd at each open subshell
     for seg in segments:
-        while seg and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[0]):
-            seg = seg[1:]  # leading VAR=value assignments
+        if seg == ["("]:
+            saved.append(cwd)
+            continue
+        if seg == [")"]:
+            cwd = saved.pop() if saved else cwd
+            continue
+        seg = unwrap(seg)
         if not seg:
             continue
         if seg[0] == "cd" and len(seg) > 1:
             cwd = os.path.join(cwd, os.path.expanduser(seg[1]))
             continue
+        script = nested_script(seg)
+        if script:
+            yield from git_invocations(script, cwd, depth + 1)
+            continue
         if os.path.basename(seg[0]).lower() not in ("git", "git.exe"):
             continue
-        i, here = 1, cwd
+        i, here, config = 1, cwd, []
         while i < len(seg) and seg[i].startswith("-"):
             opt = seg[i]
             if opt in GIT_OPTS_WITH_VALUE and i + 1 < len(seg):
                 if opt == "-C":
                     here = os.path.join(here, os.path.expanduser(seg[i + 1]))
+                elif opt == "-c":
+                    config.append(seg[i + 1])
                 i += 2
             else:
                 i += 1
         if i < len(seg):
-            yield here, seg[i], seg[i + 1:]
+            yield here, seg[i], seg[i + 1:], config
 
 
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n(.*?)\n\s*\2\s*(?:\n|$|\))", re.S)
+
+
+def commit_cluster(a):
+    """Split a short-option cluster such as -am into (flags, value letter, attached value).
+
+    The value letter is the first option that takes a value (or None), so
+    `-nm` is (n, m, "") and `-unormal` is ("", u, "normal"). None for non-clusters."""
+    if not re.match(r"^-[a-zA-Z]", a):
+        return None
+    body = a[1:]
+    for k, c in enumerate(body):
+        if c in COMMIT_VALUE_LETTERS or c in COMMIT_ATTACHED_LETTERS:
+            return body[:k], c, body[k + 1:]
+    return body, None, ""
+
+
+def skips_hooks(args, config):
+    """True for --no-verify, -n in any cluster, or -c core.hooksPath=..."""
+    if any(c.lower().startswith("core.hookspath") for c in config):
+        return True
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+        elif a == "--":
+            break
+        elif a == "--no-verify":
+            return True
+        elif a in COMMIT_LONG_WITH_VALUE:
+            skip = True
+        else:
+            cluster = commit_cluster(a)
+            if cluster and "n" in cluster[0]:
+                return True
+            skip = bool(cluster and cluster[1] in COMMIT_VALUE_LETTERS and not cluster[2])
+    return False
 
 
 def commit_message(args, raw_command):
@@ -189,13 +329,13 @@ def commit_message(args, raw_command):
         if a == "--":
             break
         nxt = args[i + 1] if i + 1 < len(args) else None
-        cluster = re.match(r"^-([a-zA-Z]*?)([mF])(.*)$", a)  # -m, -am, -mmsg, -F
+        cluster = commit_cluster(a)  # -m, -am, -mmsg, -F
         if a in ("--message", "--file"):
             val, is_file = nxt, a == "--file"
         elif a.startswith(("--message=", "--file=")):
             val, is_file = a.split("=", 1)[1], a.startswith("--file=")
-        elif cluster:
-            val, is_file = cluster.group(3) or nxt, cluster.group(2) == "F"
+        elif cluster and cluster[1] in ("m", "F"):
+            val, is_file = cluster[2] or nxt, cluster[1] == "F"
         else:
             continue
         if val is None:
@@ -215,7 +355,7 @@ def commit_message(args, raw_command):
 # ---------------------------------------------------------------- commit / push
 
 
-def check_commit(cwd, args, raw):
+def check_commit(cwd, args, raw, config=()):
     root = repo_root(cwd)
     branch = current_branch(cwd) if root else None
     if not root:
@@ -250,10 +390,45 @@ def check_commit(cwd, args, raw):
                 "detail into the body."
             ).format(l=len(subject), n=MAX_SUBJECT, s=subject))
 
-    if "--no-verify" in args or "-n" in args:
-        asks.append("git-workflow-guard: this commit uses --no-verify and skips the "
-                    "repo's git hooks. Allow it?")
+    if skips_hooks(args, config):
+        asks.append("git-workflow-guard: this commit uses --no-verify (or overrides "
+                    "core.hooksPath) and skips the repo's git hooks. Allow it?")
     return ("ask", "\n\n".join(asks)) if asks else None
+
+
+# ---------------------------------------------------------------- discarded work
+
+
+def has_short_flag(args, letter):
+    return any(re.fullmatch(r"-[a-zA-Z]*" + letter + r"[a-zA-Z]*", a) for a in args)
+
+
+def check_discard(sub, args):
+    """Ask before git commands that throw away uncommitted work or unmerged commits."""
+    what = None
+    if sub == "reset" and "--hard" in args:
+        what = "`git reset --hard` discards every uncommitted change in tracked files"
+    elif sub == "clean" and ("--force" in args or has_short_flag(args, "f")) \
+            and not ("--dry-run" in args or has_short_flag(args, "n")):
+        what = "`git clean` deletes untracked files{}".format(
+            ", including ignored ones" if has_short_flag(args, "x") else "")
+    elif sub == "branch" and (has_short_flag(args, "D") or (
+            ("-d" in args or "--delete" in args) and ("-f" in args or "--force" in args))):
+        what = "`git branch -D` deletes a branch even if it isn't merged"
+    elif sub == "stash" and args[:1] in (["drop"], ["clear"]):
+        what = "`git stash {}` deletes stashed changes".format(args[0])
+    elif sub in ("checkout", "switch") and (
+            "--force" in args or "--discard-changes" in args or has_short_flag(args, "f")):
+        what = "`git {} --force` throws away uncommitted changes".format(sub)
+    elif sub == "checkout" and (("--" in args and args[-1] != "--") or "." in args):
+        what = "`git checkout -- <path>` overwrites uncommitted changes in those files"
+    elif sub == "restore" and not (("--staged" in args or "-S" in args)
+                                   and not ("--worktree" in args or "-W" in args)):
+        what = "`git restore` overwrites uncommitted changes in those files"
+    if not what:
+        return None
+    return ("ask", "git-workflow-guard: {}, and git can't bring that work back. "
+                   "Check `git status` first. Allow it?".format(what))
 
 
 # ---------------------------------------------------------------- new branches
@@ -405,16 +580,18 @@ def evaluate(payload):
         return []
     cwd = payload.get("cwd") or os.getcwd()
     results = []
-    for here, sub, args in git_invocations(command, cwd):
+    if "git-guard.json" in command:  # best effort: a shell write to the config
+        results.append(("ask", CONFIG_ASK.format(CONFIG_FILE) + " This command mentions it."))
+    for here, sub, args, config in git_invocations(command, cwd):
         if sub == "commit":
-            r = check_commit(here, args, command)
+            r = check_commit(here, args, command, config)
         elif sub == "push":
             r = check_push(here, args)
         elif sub in ("switch", "checkout", "branch"):
             name = new_branch_name(sub, args)
-            r = check_branch_name(name) if name else None
+            r = check_branch_name(name) if name else check_discard(sub, args)
         else:
-            r = None
+            r = check_discard(sub, args)
         if r:
             results.append(r)
     return results

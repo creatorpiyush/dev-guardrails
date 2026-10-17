@@ -1,0 +1,80 @@
+"""Plugins install separately and can't import each other, so some code is
+copied between them (see CLAUDE.md). These tests fail when a copy drifts."""
+import ast
+import importlib.util
+import re
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+GIT_GUARD = ROOT / "git-workflow-guard" / "hooks" / "git_guard.py"
+SECRET_SCAN = ROOT / "secret-scan-guard" / "hooks" / "secret_scan.py"
+PATTERNS = ROOT / "secret-scan-guard" / "hooks" / "patterns.py"
+PROTECTED_FILES = ROOT / "protected-files-guard" / "hooks" / "protected_files_guard.py"
+PR_WRITER = ROOT / "pr-writer" / "scripts" / "collect_context.py"
+
+
+def definition(path, name):
+    """ast.dump of a top-level function (docstring dropped) or assignment."""
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            body = node.body
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                node.body = body[1:]
+            return ast.dump(node)
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+            return ast.dump(node.value)
+    raise AssertionError("{} not found in {}".format(name, path))
+
+
+def load(path):
+    spec = importlib.util.spec_from_file_location(path.stem + "_sync", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("name", [
+    "SEPARATOR_CHARS", "KEYWORDS", "WRAPPERS", "SHELLS", "SHELL_OPTS_WITH_VALUE", "MAX_DEPTH",
+    "GIT_OPTS_WITH_VALUE", "split_segments", "takes_separate_value", "unwrap", "nested_script",
+    "git_invocations",
+])
+def test_shell_parsing_copied_to_secret_scan(name):
+    assert definition(GIT_GUARD, name) == definition(SECRET_SCAN, name)
+
+
+@pytest.mark.parametrize("name", [
+    "PROTECTED", "PROTECTED_PREFIXES", "is_protected", "TYPES", "CONVENTIONAL", "load_rules",
+])
+def test_branch_rules_copied_to_pr_writer(name):
+    copy = definition(PR_WRITER, name).replace("GUARD_CONFIG", "CONFIG_FILE")
+    assert definition(GIT_GUARD, name) == copy
+
+
+def test_secret_rules_copied_to_pr_writer():
+    patterns = load(PATTERNS)
+    high = [(r.id, r.regex.pattern) for r in patterns.RULES if r.confidence == patterns.HIGH]
+    copy = [(name, rx.pattern) for name, rx in load(PR_WRITER).SECRET_RULES]
+    assert copy == high
+
+
+def test_wrapper_options_match_protected_files():
+    assert definition(GIT_GUARD, "takes_separate_value") == definition(
+        PROTECTED_FILES, "takes_separate_value")
+
+
+@pytest.mark.parametrize("pattern", [
+    ".env", ".env.*", "*.pem", "LICENSE*", ".github/workflows/**", "**/migrations/**",
+    "docs/", "/build", "src/*.py", "file?.txt", "[ab].txt", "[!a]x", "a/**/b",
+])
+@pytest.mark.parametrize("path", [
+    ".env", "config/.env.local", "KEY.PEM", "LICENSE.md", ".github/workflows/ci.yml",
+    "app/migrations/0001.py", "docs/a/b.md", "build", "src/build", "src/x.py", "src/a/x.py",
+    "file1.txt", "a.txt", "bx", "a/b", "a/x/y/b",
+])
+def test_glob_re_copied_to_pr_writer(pattern, path):
+    original = load(PROTECTED_FILES).glob_re(pattern)
+    copy = load(PR_WRITER).glob_re(pattern)
+    assert bool(original.fullmatch(path)) == bool(copy.fullmatch(path))
+    assert copy.flags & re.IGNORECASE

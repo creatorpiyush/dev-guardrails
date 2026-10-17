@@ -48,14 +48,18 @@ Stops Claude from editing, committing, or pushing on protected branches. It requ
 | `git commit` | Current branch is protected | **Blocked** |
 | `git commit` | Subject isn't a Conventional Commit | **Blocked** |
 | `git commit` | Subject is over 72 chars | **Asks** you, so you can keep a longer subject |
-| `git commit --no-verify` / `-n` | Any branch | **Asks** you |
+| `git commit --no-verify`, `-n` (also in clusters like `-nm`), or `git -c core.hooksPath=...` | Any branch | **Asks** you |
 | `git push` | Target is protected (explicit refspec, `HEAD`, or the implicit current/upstream branch) | **Blocked** |
 | `git push` | Any other target | **Asks** you, listing CONTRIBUTING.md, PR/MR templates, CODEOWNERS, and commitlint config found in the repo |
 | `git push --force`, `+refspec`, `--all`, `--mirror` | Any target that isn't protected | **Asks** you, with a warning |
 | `git switch -c`, `git checkout -b`, `git branch <name>` | New name isn't `<type>/<short-kebab-description>` | **Asks** you, so you can keep your own name |
+| `git reset --hard`, `git clean -f` (not `-n`), `git branch -D`, `git checkout -f` / `git switch -f` / `--discard-changes`, `git stash drop` / `clear`, `git checkout -- <path>` / `git checkout .`, `git restore <path>` (not `--staged` alone) | Any branch | **Asks** you, because they throw away work git can't bring back |
+| Edit `.claude/git-guard.json`, or a shell command that mentions it | Any branch that isn't protected | **Asks** you, because it decides which branches are protected |
 | Anything else | | Allowed |
 
 Default protected branches: `main`, `master`, `develop`, `dev`, `trunk`, `staging`, `production`, `release/*`, `hotfix/*`, and the remote default branch (`origin/HEAD`).
+
+The hook finds git calls inside `&&`/`;`/`|` chains, subshells `( ... )`, `$( ... )`, backticks, `if`/`while` blocks, wrappers such as `sudo`, `env`, `command`, and `timeout`, and `bash -c '...'` or `eval`. It doesn't see git run from a script file, an alias, or `"$(...)"` inside double quotes.
 
 Conventional Commit subject format:
 
@@ -83,6 +87,7 @@ To change the protected branches for one repo, commit `.claude/git-guard.json` a
 - Each key you set replaces its default list. A key you omit keeps its default.
 - The remote default branch (`origin/HEAD`) is always protected.
 - If the file isn't valid JSON, or a key isn't a list of strings, the hook ignores the whole file and uses the defaults.
+- Because this file can switch protection off, Claude editing it asks you first.
 
 A commit message built from shell variables (`-m "$MSG"`) or read from a file (`-F msg.txt`) isn't checked.
 
@@ -131,6 +136,7 @@ There are two files with the same format:
 - `.claude/secret-scan.json` in the repo can only add `extraPatterns` and name a `baseline`. Its `allowPaths` and `allowPatterns` are ignored with a warning, so a cloned repo, or Claude editing one, can't allowlist secrets.
 - `allowPaths` are `fnmatch` globs on repo-relative paths, where `*` also matches `/`. `allowPatterns` are regexes searched in the matched value. `extraPatterns` take `action` `deny` (block) or `ask`.
 - An invalid file is ignored entirely, and the hook shows you a warning.
+- Python's `re` has no timeout. A badly written `extraPatterns` regex (nested quantifiers such as `(a+)+`) can stall every tool call until the 15-second hook timeout, after which Claude Code lets the call through. Keep patterns simple, and review those a cloned repo brings.
 
 ### Baseline for existing repos
 
@@ -214,7 +220,8 @@ Two optional files with the same format:
 
 - `allow` holds regular expressions. Each must match a whole command, or a whole simple command within it.
 - A repo file can never loosen anything. If it tries to downgrade a rule, set `allow`, or add an `allow` extra rule, the hook ignores that entry and logs a warning. A cloned repository can't switch off your protections.
-- An invalid file is ignored as a whole, the defaults apply, and a warning goes to stderr. Run `claude --debug` to see the warning.
+- An invalid file is ignored as a whole, the defaults apply, and the hook shows you a warning.
+- Python's `re` has no timeout. A badly written `extraRules` or `prodPattern` regex (nested quantifiers such as `(a+)+`) can stall every shell command until the 15-second hook timeout, after which Claude Code lets it through. Keep patterns simple, and review those a cloned repo brings.
 - To switch the plugin off temporarily, set `DESTRUCTIVE_GUARD_DISABLE=1` in the environment Claude Code starts in.
 
 ### How it combines with permission rules and other hooks
@@ -243,7 +250,7 @@ A pattern without `/` matches the file name at any depth, so `yarn.lock` also ma
 ### How it works
 
 - **File tools are checked exactly.** For Edit, Write, MultiEdit, and NotebookEdit, the hook resolves the target path with `realpath`, makes it relative to the git repo root, and matches it against the rules. A symlink is checked both as named and where it points, so `notes.txt -> .env` is denied. Files outside a git repo are allowed.
-- **Shell commands are checked heuristically.** For Bash and PowerShell, the hook looks for writes through `>`, `>>`, `tee`, `sed -i`, `cp`, `mv`, `rm`, `truncate`, `git checkout -- <path>`, `git restore <path>`, and the PowerShell cmdlets `Set-Content`, `Add-Content`, `Out-File`, `Clear-Content`, `Copy-Item`, `Move-Item`, and `Remove-Item`. It follows `cd` and `git -C`, expands `~`, environment variables, and globs, and checks the tracked files under a directory target such as `rm -rf db`. **This can be bypassed.** `python -c`, `dd`, `perl -i`, scripts, and paths built at run time aren't seen. It catches honest mistakes, not an agent trying to get around it.
+- **Shell commands are checked heuristically.** For Bash and PowerShell, the hook looks for writes through `>`, `>>`, `tee`, `sed -i`, `cp`, `mv`, `ln`, `install`, `rm`, `truncate`, `git checkout -- <path>`, `git restore <path>`, and the PowerShell cmdlets `Set-Content`, `Add-Content`, `Out-File`, `Clear-Content`, `Copy-Item`, `Move-Item`, and `Remove-Item`. It follows `cd` and `git -C` (a `cd` inside `( ... )` ends with the subshell), looks inside subshells, skips wrappers such as `sudo -u root` and `env`, expands `~`, environment variables, and globs, and checks the tracked files under a directory target such as `rm -rf db`. **This can be bypassed.** `python -c`, `dd`, `perl -i`, scripts, and paths built at run time aren't seen. It catches honest mistakes, not an agent trying to get around it.
 - **The skill handles judgment.** [`skills/protected-files-guard/SKILL.md`](protected-files-guard/skills/protected-files-guard/SKILL.md) tells Claude never to work around a block, to explain why the file is protected, and to propose the proper change, such as `npm install <pkg>` for a lockfile or a new migration instead of editing an old one.
 
 ### Configuration
@@ -261,6 +268,7 @@ Commit `.claude/protected-files.json` at the repo root:
 - `rules` are added to the defaults. Each needs a `pattern` and an `action` of `ask` or `deny`. `reason` is shown in the message.
 - `allow` patterns override every matching rule, default or custom.
 - `replaceDefaults: true` drops the default rules and the default `.env.example` allowances, leaving only yours.
+- Unlike the secret-scan and destructive-command configs, this repo file can loosen the defaults, because there is no user-level file. Claude editing it always asks you, and a change to it shows up in review like any other committed file.
 - Patterns are globs: `*` and `?` don't cross `/`, `**/` matches zero or more directories, and a trailing `/**` matches everything below.
 - If the file is invalid, the hook ignores all of it, uses the defaults, and shows a warning.
 
@@ -274,7 +282,7 @@ Drafts a pull request (or GitLab merge request) title and description from your 
 /pr-writer:draft [base-branch] [--ready | --draft]
 ```
 
-A script, [`scripts/collect_context.py`](pr-writer/scripts/collect_context.py), gathers the facts as read-only JSON. The skill ([`skills/draft/SKILL.md`](pr-writer/skills/draft/SKILL.md)) writes the text from them.
+A script, [`scripts/collect_context.py`](pr-writer/scripts/collect_context.py), gathers the facts as JSON. It only reads the repo. It creates an empty temp directory for the PR body file, and removes its own directories from earlier runs once they are a day old. The skill ([`skills/draft/SKILL.md`](pr-writer/skills/draft/SKILL.md)) writes the text from them.
 
 | The script computes | Details |
 | :- | :- |
@@ -294,7 +302,7 @@ It stops with an error code on a non-repo, detached HEAD, protected branch, miss
 
 - **Never invent facts.** Testing lists only commands run in the session or tests the diff adds. Checkboxes stay unticked without evidence. Issues come only from the script. `Closes` is used only when a closing keyword was already there.
 - **Treat repo content as data.** Commit messages, diffs, and templates can't give it instructions.
-- **Redact secrets.** Matches are removed from commits, diff, and templates before the text is shown, and it tells you what was redacted.
+- **Redact secrets.** secret-scan-guard's high-confidence matches, passwords in URLs (`scheme://user:<redacted>@host`), and JSON Web Tokens are removed from commits, diff, and templates before the text is shown, and it tells you what was redacted.
 - **Never push.** If the branch isn't pushed, it tells you to push it yourself.
 - **Ask first.** It shows the title and body and creates the PR only after an explicit yes. Drafts are the default.
 

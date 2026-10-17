@@ -170,6 +170,128 @@ def test_no_verify_asks(repo):
     assert kind == "ask" and "--no-verify" in reason
 
 
+@pytest.mark.parametrize("command", [
+    'git commit -nm "fix: thing"',
+    'git commit -an -m "fix: thing"',
+    'git -c core.hooksPath=/dev/null commit -m "fix: thing"',
+])
+def test_hook_skipping_variants_ask(repo, command):
+    repo.on("feat/thing")
+    kind, reason = decision(run_hook(bash(repo, command)))
+    assert kind == "ask" and "skips the repo's git hooks" in reason
+
+
+@pytest.mark.parametrize("command", [
+    'git commit -unormal -m "fix: thing"',  # the m in -unormal is the mode, not -m
+    'git commit -m "fix: -n is not a flag here"',
+    'git commit -S -m "fix: signed"',
+])
+def test_option_values_not_misread(repo, command):
+    repo.on("feat/thing")
+    r = run_hook(bash(repo, command))
+    assert r.returncode == 0 and r.stdout == "", command
+
+
+@pytest.mark.parametrize("command", [
+    "(git push origin main)",
+    "if true; then git push origin main; fi",
+    "sudo -u me git push origin main",
+    "env GIT_TRACE=1 git push origin main",
+    "command git push origin main",
+    'bash -c "git push origin main"',
+    "eval git push origin main",
+    "echo $(git push origin main)",
+    "echo `git push origin main`",
+    "{ git push origin main; }",
+    "sudo -iu me git push origin main",
+    "sudo -uroot git push origin main",
+    "/usr/bin/sudo git push origin main",
+    'bash -o pipefail -c "git push origin main"',
+])
+def test_wrapped_push_to_protected_blocked(repo, command):
+    repo.on("feat/thing")
+    r = run_hook(bash(repo, command))
+    assert r.returncode == 2 and "protected branch" in r.stderr, command
+
+
+def test_subshell_commit_on_main_blocked(repo):
+    assert run_hook(bash(repo, '(cd . && git commit -m "feat: x")')).returncode == 2
+
+
+@pytest.mark.parametrize("command", [
+    '(cd ../other); git commit -m "feat: x"',
+    "(cd ../other && git status); git push",
+    'echo $(cd ../other); git commit -m "feat: x"',
+])
+def test_cd_inside_subshell_does_not_leak(repo, command):
+    other = repo.root.parent / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+    git(other, "symbolic-ref", "HEAD", "refs/heads/feat/other")
+    r = run_hook(bash(repo, command))  # repo is on main
+    assert r.returncode == 2, command
+
+
+def test_cd_inside_subshell_applies_inside(repo):
+    other = repo.root.parent / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+    git(other, "symbolic-ref", "HEAD", "refs/heads/feat/other")
+    r = run_hook(bash(repo, '(cd ../other && git commit -m "feat: x")'))
+    assert r.returncode == 0 and r.stdout == ""
+
+
+def test_dash_c_after_script_name_is_not_a_script(repo):
+    repo.on("feat/thing")
+    r = run_hook(bash(repo, 'bash ./deploy.sh -c "git push origin main"'))
+    assert r.returncode == 0 and r.stdout == ""
+
+
+# ---------------------------------------------------------------- discarded work
+
+@pytest.mark.parametrize("command", [
+    "git reset --hard",
+    "git reset --hard origin/feat/thing",
+    "git clean -fd",
+    "git clean -fdx",
+    "git clean --force",
+    "git branch -D old",
+    "git branch --delete --force old",
+    "git stash drop",
+    "git stash clear",
+    "git checkout -- file.txt",
+    "git checkout .",
+    "git restore file.txt",
+    "git restore --staged --worktree file.txt",
+    "git checkout -f feat/other",
+    "git checkout --force feat/other",
+    "git switch --discard-changes feat/other",
+    "git switch -f feat/other",
+])
+def test_discarding_work_asks(repo, command):
+    repo.on("feat/thing")
+    r = run_hook(bash(repo, command))
+    assert r.returncode == 0
+    kind, reason = decision(r)
+    assert kind == "ask" and "can't bring that work back" in reason, command
+
+
+@pytest.mark.parametrize("command", [
+    "git reset --soft HEAD~1",
+    "git reset file.txt",
+    "git clean -n",
+    "git clean -fn",
+    "git stash",
+    "git stash list",
+    "git restore --staged file.txt",
+    "git checkout feat/other",
+])
+def test_non_discarding_allowed(repo, command):
+    repo.on("feat/thing")
+    r = run_hook(bash(repo, command))
+    assert r.returncode == 0 and r.stdout == "", command
+
+
 # ---------------------------------------------------------------- new branches
 
 @pytest.mark.parametrize("command", [
@@ -191,7 +313,6 @@ def test_off_convention_branch_asks(repo, command):
     "git checkout -b fix/sdk-3.8-timeout",
     "git branch docs/readme",
     "git switch main",
-    "git checkout -- file.txt",
     "git branch -d old",
     "git branch -m old new",
     "git branch",
@@ -264,6 +385,15 @@ def test_custom_config_respected(repo):
     assert run_hook(edit(repo.root / "a.py")).returncode == 2
     repo.on("rel-9")
     assert run_hook(edit(repo.root / "a.py")).returncode == 2
+
+
+def test_config_edit_asks_on_feature_branch(repo):
+    repo.on("feat/thing")
+    kind, reason = decision(run_hook(edit(repo.root / ".claude" / "git-guard.json")))
+    assert kind == "ask" and "sets which branches are protected" in reason
+    shell = "echo '{\"protected\": []}' > .claude/git-guard.json"
+    kind, _ = decision(run_hook(bash(repo, shell)))
+    assert kind == "ask"
 
 
 @pytest.mark.parametrize("text", ["{not json", "[]", '{"protected": "main"}', '{"protected": [1]}'])
