@@ -12,6 +12,7 @@ python -m pytest tests/test_secret_scan.py                       # one plugin's 
 python -m pytest tests/test_pr_writer.py                         # pr-writer tests
 python -m pytest tests/test_test_before_commit.py                # test-before-commit tests
 python -m pytest tests/test_humanizer.py                         # humanizer tests
+python -m pytest tests/test_test_writer.py                       # test-writer tests
 python -m pytest -k push                          # tests matching a name
 claude plugin validate .                          # marketplace.json + every relative-path plugin
 claude plugin validate ./<plugin>                 # one plugin's manifest
@@ -119,6 +120,19 @@ No guard. `skills/review/SKILL.md` (`disable-model-invocation: true`, invoked as
 - **Copied pieces, keep in sync:** the shell parsing block from `git_guard.py` (in the hook), and `glob_re` from `protected_files_guard.py` (in `scan.py`), both checked by `tests/test_copies_in_sync.py`.
 - Fixtures in `tests/fixtures/humanizer/` are before/after pairs. `cases.json` lists the finding ids each `before` file must produce. Its `after` file must have no medium or high findings.
 - The README must keep saying it is an editor, not a detector-evasion tool, and that it doesn't replace AI-disclosure requirements.
+
+### test-writer
+
+No hooks. `skills/write/SKILL.md` (`disable-model-invocation: true`, invoked as `/test-writer:write`) loads `skills/test-writer/SKILL.md` by path. That skill is also model-invocable, so "write tests for X" triggers it. `scripts/detect_tests.py` gathers the facts; Claude writes and runs the tests.
+
+- `detect_tests.py` is a single stdlib-only file, Python 3.9 compatible. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `bad-arguments`, `target-not-found`, `base-not-found`, `snapshot-too-large`, `internal-error`. Every `git` call goes through `git()`, which returns `None` on failure.
+- Files come from `git ls-files -co --exclude-standard`, minus `SKIP_PARTS` directories and minified files. `Repo.read()` refuses `SECRET_NAMES` (checked on the name and on the `realpath`, so a symlink can't reach `.env`), files over `MAX_READ`, binary files, and anything resolving outside the repo. A `test_*.py` with no `def test` or `TestCase` counts as source.
+- Tables to extend: `FRAMEWORKS` (language, the keyword that ties a command to the framework, default, file and single templates), `CONVENTIONS` and `FILE_PATTERNS` (Python and JavaScript only; other languages report `"unknown"`), `SERVICES`, `COVERAGE_REPORTS`.
+- `command_sources()` returns candidates in trust order: `package.json` scripts, `Makefile`/`justfile` targets, pytest config, `tox.ini`, CI files. `INSTALL` drops install lines. A framework gets the first candidate whose text matches its keyword (`npm test` matches any JS framework), else its default with `confidence: "low"`.
+- `score_tests()` ranks exemplars: same stem 100, imports the target 80, names the file 60, mirrored path 40, same directory 30, shared imports 5 each (max 25). A test with a 60+ part is an existing test for the target.
+- **`--snapshot` is the one write.** It copies `ls-files -co` output, without `.git`, into `mkdtemp(prefix="test-writer-")` with a `.test-writer-snapshot` marker, so the mutation check can edit a copy that git-workflow-guard doesn't treat as a repo. `sweep_snapshots()` removes this user's day-old `test-writer-*` directories, and only those holding the marker. The skill never deletes snapshots itself.
+- The skill must only add or extend test files, never change the code under test, never weaken existing tests, report suspected bugs instead of fixing them, and never commit or push. Test commands aren't in `allowed-tools`, so each one asks. If you change a rule, update SKILL.md and the README together.
+- Tests set `TMPDIR`/`TEMP`/`TMP` per test for snapshots, and write fixtures as untracked files in unborn repos.
 
 ### Tests
 
