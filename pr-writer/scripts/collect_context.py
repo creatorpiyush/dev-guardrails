@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -371,6 +372,143 @@ def suggest_title(commits, cfg):
             "valid": None, "problems": []}
 
 
+# copied from protected-files-guard/hooks/protected_files_guard.py; keep in sync (see CLAUDE.md)
+def glob_re(pattern, ignore_case=True):
+    """Compile a gitignore-style glob. `**/` is zero or more directories, `/**`
+    everything below, `*` and `?` never cross `/`."""
+    pat = pattern.strip()
+    if pat.endswith("/"):
+        pat += "**"
+    anchored = "/" in pat
+    pat = pat.lstrip("/")
+    out, i = "", 0
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pat.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pat[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pat[i] == "?":
+            out, i = out + "[^/]", i + 1
+        elif pat[i] == "[" and "]" in pat[i + 2:]:
+            end = pat.index("]", i + 2)
+            body = pat[i + 1:end]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out, i = out + "[" + body.replace("\\", "\\\\") + "]", end + 1
+        else:
+            out, i = out + re.escape(pat[i]), i + 1
+    if not anchored:
+        out = "(?:.*/)?" + out
+    return re.compile(out, re.IGNORECASE if ignore_case else 0)
+
+
+TEMPLATE_FILES = (".github/pull_request_template.md", "docs/pull_request_template.md",
+                  "pull_request_template.md")
+TEMPLATE_DIRS = (".github/PULL_REQUEST_TEMPLATE", "docs/PULL_REQUEST_TEMPLATE",
+                 "PULL_REQUEST_TEMPLATE", ".gitlab/merge_request_templates")
+TEMPLATE_CAP = 20000
+CODEOWNERS_FILES = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS", ".gitlab/CODEOWNERS")
+
+
+def _resolve(root, rel):
+    """Resolve rel under root matching each component case-insensitively; None if absent."""
+    cur, parts = root, []
+    for comp in rel.split("/"):
+        try:
+            names = {n.lower(): n for n in os.listdir(cur)}
+        except OSError:
+            return None
+        actual = names.get(comp.lower())
+        if not actual:
+            return None
+        cur = os.path.join(cur, actual)
+        parts.append(actual)
+    return "/".join(parts)
+
+
+def find_templates(root):
+    paths = []
+    for rel in TEMPLATE_FILES:
+        found = _resolve(root, rel)
+        if found and os.path.isfile(os.path.join(root, found)):
+            paths.append(found)
+    for rel in TEMPLATE_DIRS:
+        found = _resolve(root, rel)
+        if found and os.path.isdir(os.path.join(root, found)):
+            names = sorted(n for n in os.listdir(os.path.join(root, found))
+                           if n.lower().endswith(".md")
+                           and os.path.isfile(os.path.join(root, found, n)))
+            paths.extend(found + "/" + n for n in names)
+    out = []
+    for p in paths:
+        try:
+            with open(os.path.join(root, p), encoding="utf-8", errors="replace") as f:
+                out.append({"path": p, "text": f.read()})
+        except OSError:
+            pass
+    return {"templates": out, "choose": len(out) > 1}
+
+
+def codeowners(root, paths):
+    rel = next((r for r in map(lambda c: _resolve(root, c), CODEOWNERS_FILES)
+                if r and os.path.isfile(os.path.join(root, r))), None)
+    out = {"file": rel, "by_file": {}, "owners": []}
+    if not rel:
+        return out
+    rules = []
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        line = line.split(" #", 1)[0].strip()
+        if not line or line.startswith(("#", "[", "^[")):
+            continue
+        pat, *own = line.split()
+        # GitHub: a bare `apps/` matches an apps directory at any depth, which glob_re
+        # would anchor because of the slash.
+        if pat.endswith("/") and "/" not in pat[:-1]:
+            pat = pat[:-1]
+        rules.append((glob_re(pat, ignore_case=False), own))
+    seen = set()
+    for path in paths:
+        parts = path.split("/")
+        cands = ["/".join(parts[:k]) for k in range(1, len(parts) + 1)]
+        match = []
+        for rx, own in rules:
+            if any(rx.fullmatch(c) for c in cands):
+                match = own
+        out["by_file"][path] = match
+        seen.update(match)
+    out["owners"] = sorted(seen)
+    return out
+
+
+def detect_host(root, path=None):
+    url = git(root, "remote", "get-url", "origin") or ""
+    m = re.match(r"^[a-z+]+://(?:[^@/]*@)?([^/:]+)", url, re.I) or re.match(r"^(?:[^@/]+@)?([^/:]+):", url)
+    remote_host = m.group(1).lower() if m else None
+    order = ["glab", "gh"] if remote_host and "gitlab" in remote_host else ["gh", "glab"]
+    available, cli, authed = {}, None, False
+    for name in order:
+        which = shutil.which(name, path=path)
+        available[name] = bool(which)
+        if which and cli is None:
+            try:
+                ok = subprocess.run([which, "auth", "status"], capture_output=True,
+                                    timeout=10).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+            if ok:
+                cli, authed = name, True
+    return {"remote_host": remote_host, "cli": cli,
+            "available": {"gh": available["gh"], "glab": available["glab"]},
+            "authenticated": authed}
+
+
 def main(argv):
     try:
         base, ready, draft, check_title_arg = parse_args(argv)
@@ -432,7 +570,15 @@ def main(argv):
                draft=False if ready else True if draft else config["draftByDefault"],
                body_file=os.path.join(tempfile.gettempdir(),
                                       "pr-writer-" + re.sub(r"[^A-Za-z0-9._-]", "-", branch) + ".md"))
-    # Task 5 fills the remaining keys here.
+    found = find_templates(root)
+    for t in found["templates"]:
+        t["text"] = redact(t["text"], redactions)  # before the cap, so a cut can't split a secret
+        if len(t["text"]) > TEMPLATE_CAP:
+            t["text"] = t["text"][:TEMPLATE_CAP]
+            warnings.append("template %s truncated to %d chars" % (t["path"], TEMPLATE_CAP))
+        check_injection(t["text"], "template " + t["path"], warnings)
+    out.update(found, codeowners=codeowners(root, [f["path"] for f in info["files"]]),
+               host=detect_host(root))
     return out
 
 
