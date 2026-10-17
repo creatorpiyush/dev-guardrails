@@ -1,6 +1,6 @@
 # dev-guardrails
 
-A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. One, pr-writer, is a skill that drafts pull request descriptions. Install only the plugins you want.
+A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. One, pr-writer, is a skill that drafts pull request descriptions. Install only the plugins you want.
 
 | Plugin | What it guards |
 | :- | :- |
@@ -8,6 +8,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [secret-scan-guard](#secret-scan-guard) | API keys, tokens, and private keys in tracked files, commits, and pushes. Asks before staging `.env` files |
 | [destructive-command-guard](#destructive-command-guard) | Irreversible shell commands: `rm -rf` on the wrong path, disk wipes, `curl \| sh`, `DROP TABLE`, `terraform destroy` |
 | [protected-files-guard](#protected-files-guard) | Silent edits to lockfiles, `.env` and key files, CI config, migrations, and license files |
+| [test-before-commit](#test-before-commit) | Commits that fail your project's tests or lint. Opt-in per repo |
 | [pr-writer](#pr-writer) | Not a guard. Drafts a PR title and description from your branch, fills the repo's PR template, and opens the PR only after you approve |
 
 ## Install
@@ -20,6 +21,7 @@ In Claude Code:
 /plugin install secret-scan-guard@dev-guardrails
 /plugin install destructive-command-guard@dev-guardrails
 /plugin install protected-files-guard@dev-guardrails
+/plugin install test-before-commit@dev-guardrails
 /plugin install pr-writer@dev-guardrails
 ```
 
@@ -31,6 +33,7 @@ claude plugin install git-workflow-guard@dev-guardrails
 claude plugin install secret-scan-guard@dev-guardrails
 claude plugin install destructive-command-guard@dev-guardrails
 claude plugin install protected-files-guard@dev-guardrails
+claude plugin install test-before-commit@dev-guardrails
 claude plugin install pr-writer@dev-guardrails
 ```
 
@@ -273,6 +276,61 @@ Commit `.claude/protected-files.json` at the repo root:
 - If the file is invalid, the hook ignores all of it, uses the defaults, and shows a warning.
 
 **Emergency escape hatch:** set `PROTECTED_FILES_GUARD_DISABLE=1` in the environment Claude Code starts in to turn the hook off for that session.
+
+## test-before-commit
+
+Runs your project's own test and lint commands before Claude runs `git commit`. If one fails, the commit is blocked and Claude gets the command, its exit code, and the last 60 lines of output, so it fixes the problem before committing. It does nothing until you configure it.
+
+| Situation | Result |
+| :- | :- |
+| No config, `git commit --amend --no-edit`, a merge commit, outside a repo, or a non-commit command | Allowed, nothing runs |
+| Every changed file matches `skipPatterns` (default `*.md`, `docs/**`, `LICENSE*`) | Allowed, nothing runs |
+| All commands pass | Allowed. The pass is cached, so retrying the same state doesn't rerun them |
+| A command fails | **Blocked**, with the trimmed output |
+| A command times out, or can't start | **Asks** you |
+| Repo config not approved yet, or changed since you approved it | **Asks** you, showing the exact commands. Nothing runs |
+
+Commands run in order from the repo root, stopping at the first failure. They run against the working tree, so "changed files" means staged plus unstaged tracked changes. The cache lives in `.git/test-before-commit-cache.json` and is keyed by `git write-tree`, the unstaged diff, and the commands, so any change reruns them. Untracked files don't affect the key.
+
+### Configuration
+
+`.claude/test-before-commit.json` in the repo, or `~/.claude/test-before-commit.json` for every repo:
+
+```json
+{
+  "commands": [
+    { "name": "lint", "run": "npm run lint", "timeout": 120 },
+    { "name": "unit tests", "run": "pytest -x -q", "timeout": 300 }
+  ],
+  "skipPatterns": ["*.md", "docs/**"],
+  "autodetect": false
+}
+```
+
+- `run` is split with `shlex` and run without a shell. Use a list (`["pytest", "-x"]`) for Windows paths with backslashes, or set `"shell": true` on a command to run it through the shell. `timeout` is in seconds and defaults to 300.
+- All commands together get 1700 seconds, inside the hook's 1800-second timeout in `hooks.json`. A command still running when time is up counts as a timeout.
+- `skipPatterns` are gitignore-style globs, matched case-insensitively. A pattern without `/` matches the file name at any depth.
+- `autodetect: true` infers commands when there's no `commands` key: `npm run lint` and `npm test` from `package.json` scripts (skipping the `npm init` stub), `pytest -q` when `pytest.ini` or a `[tool.pytest` section in `pyproject.toml` exists, `cargo test` for `Cargo.toml`, and `go test ./...` for `go.mod`. It's off by default.
+- Repo keys override user keys. `commands` wins over `autodetect`.
+- An invalid file is ignored with a warning, and the other file still applies.
+
+### Approving repo commands
+
+A config file in a repo you cloned can run anything on your machine, so commands only run without approval when they come from your user config. When a repo config exists, its contents and the commands they resolve to must match a hash you approved:
+
+1. On the first commit, and whenever the repo config changes, the hook asks and shows the exact commands. Allowing commits once without running them.
+2. Run `/test-before-commit:trust`. The hook asks you to confirm and shows the commands again. Once you allow it, the hash is saved in `~/.claude/test-before-commit-trust.json` under the repo's path.
+3. Retry the commit. The commands run.
+
+You can also run `python3 <plugin>/hooks/test_before_commit.py --trust` from the repo in your own terminal.
+
+**The trade-off:** a hook can't tell whether you answered yes to its prompt, so approval is a separate step instead of the prompt itself. Claude could run the trust command too, but the hook asks before any shell command that mentions the trust script, `test-before-commit-trust.json`, or `test-before-commit.json`, and before any edit to the user config or trust file. So you always see the commands when you approve. That prompt depends on your permission mode honoring hook asks. Changes to `package.json` scripts or test files don't need re-approval, because running a project's tests runs its code anyway.
+
+### Combining with git-workflow-guard
+
+Both plugins hook `Bash|PowerShell` and run in parallel. A block from either one stops the commit. git-workflow-guard can block a commit (protected branch, bad subject) while the tests still run, which costs time but changes nothing.
+
+**Emergency escape hatch:** set `TEST_BEFORE_COMMIT_DISABLE=1` in the environment Claude Code starts in to turn the hook off for that session.
 
 ## pr-writer
 

@@ -30,6 +30,11 @@
       "name": "pr-writer",
       "source": "./pr-writer",
       "description": "Writes pull request and merge request titles and bodies from your branch's commits and diff, then opens the PR after you approve."
+    },
+    {
+      "name": "test-before-commit",
+      "source": "./test-before-commit",
+      "description": "Runs your project's test and lint commands before Claude commits, and blocks the commit with the failure output until it is fixed."
     }
   ]
 }
