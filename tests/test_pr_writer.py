@@ -719,6 +719,24 @@ def test_host_ignores_cli_in_repo_or_cwd(repo, monkeypatch):
     assert host(repo, sub)["cli"] is None
 
 
+def test_diff_unreadable_marks_truncated(repo):
+    feature(repo, "feat: a")
+    mod = load_module()
+    real = mod.git
+
+    def fake(cwd, *args):
+        if "diff" in args and args[-1] == "main..HEAD" and not {"--stat", "--numstat"} & set(args):
+            return None
+        return real(cwd, *args)
+
+    mod.git = fake
+    warnings = []
+    d = mod.diff_info(str(repo.root), "main", 60000, warnings)
+    assert d["truncated"] is True and d["text"] is None
+    assert [e["path"] for e in d["excerpts"]] == ["f.txt"]
+    assert "diff could not be read in full" in warnings
+
+
 def test_base_strips_origin_prefix(repo):
     repo.remote()
     feature(repo, "feat: a")

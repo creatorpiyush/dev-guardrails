@@ -267,7 +267,9 @@ DIFF = ("-c", "core.quotepath=off", "diff", "--no-color", "--no-ext-diff")
 
 
 def numstat(root, merge_base):
-    raw = git(root, *DIFF, "--numstat", "-z", "%s..HEAD" % merge_base) or ""
+    raw = git(root, *DIFF, "--numstat", "-z", "%s..HEAD" % merge_base)
+    if raw is None:
+        return None
     parts, files, i = raw.split("\0"), [], 0
     while i < len(parts):
         head = parts[i].split("\t", 2)
@@ -284,12 +286,15 @@ def numstat(root, merge_base):
     return files
 
 
-def diff_info(root, merge_base, cap):
+def diff_info(root, merge_base, cap, warnings):
     rng = "%s..HEAD" % merge_base
     files = numstat(root, merge_base)
     stat = git(root, *DIFF, "--stat", rng) or ""
-    text = git(root, *DIFF, rng) or ""
-    if len(text.encode("utf-8")) <= cap:
+    text = git(root, *DIFF, rng)
+    if text is None or files is None:
+        warnings.append("diff could not be read in full")
+        files = files or []
+    elif len(text.encode("utf-8")) <= cap:
         return {"files": files, "stat": stat, "text": text, "truncated": False, "excerpts": []}
     top = sorted((f for f in files if not f["binary"]),
                  key=lambda f: f["added"] + f["deleted"], reverse=True)[:EXCERPT_FILES]
@@ -582,7 +587,7 @@ def main(argv):
                     "note": (BREAKING_FOOTER.search(c["body"]) or [None, None])[1] or None}
                    for c in commit_list if c["breaking"]])
     out.update(push_state(root, branch))
-    info = diff_info(root, mb, config["diffSizeCap"])
+    info = diff_info(root, mb, config["diffSizeCap"], warnings)
     sanitize_diff(info, redactions, warnings)
     out.update(diff=info, redactions=redactions)
     out.update(issues=issue_refs(branch, commit_list), title=suggest_title(commit_list, config),
