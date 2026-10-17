@@ -681,3 +681,10 @@ def test_missing_base_hint_mentions_positional(repo):
     repo.commit("feat: a")
     msg = run_script(repo.root)["error"]["message"]
     assert "Pass the base branch" in msg
+
+
+def test_base_strips_origin_prefix(repo):
+    repo.remote()
+    feature(repo, "feat: a")
+    out = run_script(repo.root, "--base", "origin/main")
+    assert out["base"] == {"name": "main", "ref": "origin/main", "source": "argument"}

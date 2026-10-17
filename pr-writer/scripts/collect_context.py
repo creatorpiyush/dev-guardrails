@@ -155,7 +155,7 @@ def resolve_base(root, arg):
         return None
 
     if arg:
-        return pick(arg, "argument")
+        return pick(arg[len("origin/"):] if arg.startswith("origin/") else arg, "argument")
     head = git(root, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD")
     if head and head.startswith("origin/"):
         found = pick(head[len("origin/"):], "origin-head")
