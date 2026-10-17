@@ -42,7 +42,6 @@ DENY, ASK = "deny", "ask"
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 SHELL_TOOLS = {"Bash", "PowerShell"}
-SHELL_OPERATORS = {"&&", "||", ";", "|", "&", "\n"}
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 COMMIT_OPTS_WITH_VALUE = {
     "-m", "--message", "-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message",
@@ -329,9 +328,32 @@ def check_edit(tool, tool_input, warnings):
 # can't import each other. Keep the two copies in sync.
 
 
+# Tokens made only of these split commands: operators, newlines, ( ) of
+# subshells and $(...), and backticks.
+SEPARATOR_CHARS = set(";&|\n()`")
+KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"}
+# wrapper -> its options that take a separate value
+WRAPPERS = {
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U"},
+    "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S"},
+    "command": set(), "builtin": set(), "nohup": set(), "exec": {"-a"},
+    "time": {"-f", "-o"},
+    "nice": {"-n"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "xargs": {"-n", "-I", "-P", "-L", "-d", "-E", "-s", "-a"},
+}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+MAX_DEPTH = 3  # nested bash -c / eval
+
+
 def split_segments(command):
-    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|")
-    lex.whitespace = " \t\r"
+    """Split a shell command into simple-command token lists. None if unparseable.
+
+    Subshells, $(...), and backticks split commands too, so `(git push)` and
+    `echo $(git push)` are seen. Quoted text stays one token."""
+    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|()`")
+    lex.whitespace = " \t\r"  # keep newlines as command separators
     lex.whitespace_split = True
     lex.commenters = ""
     try:
@@ -340,7 +362,7 @@ def split_segments(command):
         return None
     segments, cur = [], []
     for tok in tokens:
-        if tok in SHELL_OPERATORS or set(tok) <= set(";&|\n"):
+        if tok and set(tok) <= SEPARATOR_CHARS:
             if cur:
                 segments.append(cur)
             cur = []
@@ -351,31 +373,73 @@ def split_segments(command):
     return segments
 
 
-def git_invocations(command, cwd):
+def unwrap(seg):
+    """Strip leading VAR=value, shell keywords, and wrappers such as sudo or env."""
+    seg = list(seg)
+    while seg:
+        if seg[0] in KEYWORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[0]):
+            seg.pop(0)
+            continue
+        name = os.path.basename(seg[0])
+        if name not in WRAPPERS:
+            break
+        seg.pop(0)
+        while seg and seg[0].startswith("-") and seg[0] != "--":
+            if seg.pop(0) in WRAPPERS[name] and seg:
+                seg.pop(0)
+        if seg and seg[0] == "--":
+            seg.pop(0)
+        if name == "timeout" and seg:
+            seg.pop(0)  # the duration
+    return seg
+
+
+def nested_script(seg):
+    """The script `bash -c '...'` or `eval ...` runs, else None."""
+    name = os.path.basename(seg[0]).lower()
+    if name == "eval":
+        return " ".join(seg[1:])
+    if name in SHELLS:
+        for k in range(1, len(seg) - 1):
+            if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", seg[k]):
+                return seg[k + 1]
+    return None
+
+
+def git_invocations(command, cwd, depth=0):
+    """Yield (cwd, subcommand, args, -c values) for each git call.
+
+    Follows `cd`, `-C`, wrappers like sudo and env, and `bash -c` / `eval`."""
     segments = split_segments(command)
-    if segments is None:
+    if segments is None or depth > MAX_DEPTH:
         return
     for seg in segments:
-        while seg and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[0]):
-            seg = seg[1:]
+        seg = unwrap(seg)
         if not seg:
             continue
         if seg[0] == "cd" and len(seg) > 1:
             cwd = os.path.join(cwd, os.path.expanduser(seg[1]))
             continue
+        script = nested_script(seg)
+        if script:
+            yield from git_invocations(script, cwd, depth + 1)
+            continue
         if os.path.basename(seg[0]).lower() not in ("git", "git.exe"):
             continue
-        i, here = 1, cwd
+        i, here, config = 1, cwd, []
         while i < len(seg) and seg[i].startswith("-"):
             opt = seg[i]
             if opt in GIT_OPTS_WITH_VALUE and i + 1 < len(seg):
                 if opt == "-C":
                     here = os.path.join(here, os.path.expanduser(seg[i + 1]))
+                elif opt == "-c":
+                    config.append(seg[i + 1])
                 i += 2
             else:
                 i += 1
         if i < len(seg):
-            yield here, seg[i], seg[i + 1:]
+            yield here, seg[i], seg[i + 1:], config
+
 
 
 # ---------------------------------------------------------------- git add / commit / push
@@ -551,7 +615,7 @@ def evaluate(payload, warnings):
                                "or baseline. Confirm with the user before running it."))
     if "git" not in command:
         return results
-    for here, sub, args in git_invocations(command, cwd):
+    for here, sub, args, _ in git_invocations(command, cwd):
         if sub == "add":
             results += check_add(args)
         elif sub == "commit":

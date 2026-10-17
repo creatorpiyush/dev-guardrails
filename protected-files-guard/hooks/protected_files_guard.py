@@ -6,8 +6,9 @@ block a tool call, prints a JSON "ask" decision to request confirmation, or
 exits 0 to allow. Any unexpected error fails open (exit 0).
 
 File tools (Edit, Write, MultiEdit, NotebookEdit) are checked exactly. Shell
-commands are checked heuristically: redirects, tee, sed -i, mv, cp, rm,
-truncate, git checkout -- <path>, git restore, and a few PowerShell cmdlets.
+commands are checked heuristically: redirects, tee, sed -i, mv, cp, ln,
+install, rm, truncate, git checkout -- <path>, git restore, and a few
+PowerShell cmdlets.
 Anything else (python -c, dd, variables, scripts) gets past it.
 
 Standard library only. Python 3.9+.
@@ -58,7 +59,13 @@ SHELL_TOOLS = {"Bash", "PowerShell"}
 
 REDIRECT_WRITE = {">", ">>", ">|", "&>", "&>>", ">&"}
 REDIRECT_READ = {"<", "<<", "<<-", "<<<", "<&"}
-WRAPPERS = {"sudo", "command", "builtin", "nohup", "time", "env"}
+# wrapper -> its options that take a separate value
+WRAPPERS = {
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U"},
+    "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S"},
+    "command": set(), "builtin": set(), "nohup": set(), "time": {"-f", "-o"},
+}
 # Every non-option argument may be written or deleted.
 ALL_ARGS = {
     "rm", "unlink", "shred", "truncate", "tee", "mv",
@@ -66,7 +73,7 @@ ALL_ARGS = {
     "set-content", "sc", "add-content", "ac", "out-file", "move-item", "mi", "move",
 }
 # Only the destination is written.
-COPY = {"cp", "copy-item", "cpi", "copy"}
+COPY = {"cp", "copy-item", "cpi", "copy", "ln", "install"}
 DEST_OPTS = {"-t", "--target-directory", "-destination"}
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 
@@ -345,6 +352,25 @@ def git_cwd(args, cwd):
     return cwd
 
 
+def strip_wrappers(words):
+    """Drop leading VAR=value and wrappers with their options, such as `sudo -u root`."""
+    while words:
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words = words[1:]
+            continue
+        name = words[0]
+        if name not in WRAPPERS:
+            break
+        words = words[1:]
+        while words and words[0].startswith("-") and words[0] != "--":
+            opt, words = words[0], words[1:]
+            if opt in WRAPPERS[name] and words:
+                words = words[1:]
+        if words and words[0] == "--":
+            words = words[1:]
+    return words
+
+
 def shell_writes(command, cwd):
     """Yield (path token, verb, cwd) for each path the command may write. Heuristic."""
     for seg in split_segments(command) or []:
@@ -361,8 +387,7 @@ def shell_writes(command, cwd):
                 continue
             words.append(tok)
             i += 1
-        while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in WRAPPERS):
-            words = words[1:]  # VAR=value, sudo, env, ...
+        words = strip_wrappers(words)
         if not words:
             continue
         name, args = os.path.basename(words[0]).lower(), words[1:]

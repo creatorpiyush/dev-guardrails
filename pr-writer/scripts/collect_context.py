@@ -4,16 +4,19 @@
 Prints exactly one JSON object on stdout and always exits 0. Failures are
 reported as {"ok": false, "error": {"code", "message"}}.
 
-Standard library only. Python 3.9+. No network.
+Standard library only. Python 3.9+. The only network access is
+`gh auth status` / `glab auth status`, which check the stored login.
 """
 import argparse
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 # copied from git-workflow-guard/hooks/git_guard.py; keep in sync (see CLAUDE.md)
 PROTECTED = ["main", "master", "develop", "dev", "trunk", "staging", "production"]
@@ -229,6 +232,15 @@ SECRET_RULES = [
     ("private-key", re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----")),
 ]
 
+# Medium-confidence secrets that secret-scan-guard only asks about, but that never
+# belong in a PR body. Only the secret part is replaced; ${VAR} and <placeholder> stay.
+EXTRA_REDACTIONS = [
+    ("url-credentials", re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@'\"]+:)(?![$<])[^/\s@'\"]+@"),
+     r"\1<redacted:url-credentials>@"),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+     "<redacted:jwt>"),
+]
+
 INJECTION = re.compile(
     r"(?i)\b(ignore|disregard|forget)\b.{0,30}\b(previous|prior|above|earlier)\b.{0,20}"
     r"\b(instructions?|prompts?|rules)\b|\byou are now\b|<\s*/?\s*system\s*>")
@@ -248,8 +260,9 @@ def redact(text, counter):
     text, n = KEY_BLOCK.subn("<redacted:private-key>", text)
     if n:
         counter["private-key"] = counter.get("private-key", 0) + n
-    for name, rx in SECRET_RULES:
-        text, n = rx.subn("<redacted:%s>" % name, text)
+    rules = [(name, rx, "<redacted:%s>" % name) for name, rx in SECRET_RULES] + EXTRA_REDACTIONS
+    for name, rx, replacement in rules:
+        text, n = rx.subn(replacement, text)
         if n:
             counter[name] = counter.get(name, 0) + n
     return text
@@ -263,7 +276,8 @@ def check_injection(text, where, warnings):
 
 
 # Unquoted UTF-8 paths in --stat and diff headers.
-DIFF = ("-c", "core.quotepath=off", "diff", "--no-color", "--no-ext-diff")
+# --literal-pathspecs: a file named `[ab].txt` or `:(glob)x` is only itself.
+DIFF = ("--literal-pathspecs", "-c", "core.quotepath=off", "diff", "--no-color", "--no-ext-diff")
 
 
 def numstat(root, merge_base):
@@ -534,6 +548,43 @@ def detect_host(root, path=None):
             "authenticated": authed}
 
 
+BODY_DIR_PREFIX = "pr-writer-"
+STALE_SECONDS = 24 * 3600
+
+
+def sweep_body_dirs(now=None):
+    """Remove this user's day-old body_file directories from earlier runs.
+
+    Only directories named pr-writer-*, owned by this user, and holding
+    nothing but body.md are removed. Errors are ignored."""
+    tmp, now = tempfile.gettempdir(), time.time() if now is None else now
+    try:
+        names = [n for n in os.listdir(tmp) if n.startswith(BODY_DIR_PREFIX)]
+    except OSError:
+        return
+    for name in names:
+        d = os.path.join(tmp, name)
+        try:
+            st = os.lstat(d)
+            if not stat.S_ISDIR(st.st_mode) or now - st.st_mtime < STALE_SECONDS:
+                continue
+            if hasattr(os, "getuid") and st.st_uid != os.getuid():
+                continue
+            inside = os.listdir(d)
+            if set(inside) - {"body.md"}:
+                continue
+            for f in inside:
+                os.unlink(os.path.join(d, f))
+            os.rmdir(d)
+        except OSError:
+            continue
+
+
+def new_body_file():
+    sweep_body_dirs()
+    return os.path.join(tempfile.mkdtemp(prefix=BODY_DIR_PREFIX), "body.md")
+
+
 def main(argv):
     try:
         base, ready, draft, check_title_arg = parse_args(argv)
@@ -595,7 +646,7 @@ def main(argv):
     out.update(diff=info, redactions=redactions)
     out.update(issues=issue_refs(branch, commit_list), title=suggest_title(commit_list, config),
                draft=False if ready else True if draft else config["draftByDefault"],
-               body_file=os.path.join(tempfile.mkdtemp(prefix="pr-writer-"), "body.md"))
+               body_file=new_body_file())
     found = find_templates(root)
     for t in found["templates"]:
         t["text"] = redact(t["text"], redactions)  # before the cap, so a cut can't split a secret

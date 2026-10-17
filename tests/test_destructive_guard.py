@@ -38,7 +38,7 @@ class Env:
         if r.returncode == 2:
             return "deny"
         if r.stdout:
-            return json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"]
+            return json.loads(r.stdout).get("hookSpecificOutput", {}).get("permissionDecision", "allow")
         return "allow"
 
     def user_config(self, data):
@@ -256,8 +256,9 @@ def test_repo_config_cannot_loosen(env):
                      "extraRules": [{"id": "x", "regex": "rm", "action": "allow"}]})
     r = env.run("terraform destroy")
     assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "ask"
-    assert "tried to loosen infra.terraform" in r.stderr
-    assert '"allow" is ignored' in r.stderr
+    message = json.loads(r.stdout)["systemMessage"]
+    assert "tried to loosen infra.terraform" in message
+    assert '"allow" is ignored' in message
     assert env.verdict("rm -rf ~") == "deny"
 
 
@@ -284,7 +285,14 @@ def test_invalid_config_falls_back(env, text):
     env.user_config(text)
     r = env.run("terraform destroy")
     assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "ask"
-    assert "ignoring it" in r.stderr
+    assert "ignoring it" in json.loads(r.stdout)["systemMessage"]
+
+
+def test_config_warning_reaches_user_on_allow(env):
+    env.user_config("{bad")
+    r = env.run("ls")
+    assert r.returncode == 0
+    assert "ignoring it" in json.loads(r.stdout)["systemMessage"]
 
 
 def test_disable_env_var(env):

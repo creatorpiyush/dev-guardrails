@@ -207,6 +207,17 @@ def test_staged_secret_blocks_commit(repo, hook):
     assert "settings.py:1" in r.stderr and GH_TOKEN not in r.stderr
 
 
+@pytest.mark.parametrize("command", [
+    'env git commit -m "feat: x"',
+    '(git commit -m "feat: x")',
+    'bash -c \'git commit -m "feat: x"\'',
+])
+def test_wrapped_commit_is_scanned(repo, hook, command):
+    (repo / "settings.py").write_text("TOKEN = '{}'\n".format(GH_TOKEN))
+    git(repo, "add", "settings.py")
+    assert hook(bash(repo, command)).returncode == 2, command
+
+
 def test_clean_commit_allowed(repo, hook):
     (repo / "a.py").write_text("x = 1\n")
     git(repo, "add", "a.py")
