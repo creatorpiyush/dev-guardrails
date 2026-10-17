@@ -198,6 +198,98 @@ def commits(root, merge_base):
         out.append(parse_commit(h.strip(), s, b.strip()))
     return out[:COMMIT_CAP], len(out) > COMMIT_CAP
 
+# copied from secret-scan-guard/hooks/secret_scan.py; keep in sync (see CLAUDE.md)
+# (the high-confidence rules from patterns.py, which block there)
+SECRET_RULES = [
+    ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("github-fine-grained-token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{50,}\b")),
+    ("gitlab-token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b")),
+    ("slack-token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
+    ("slack-webhook", re.compile(
+        r"https://hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+")),
+    ("anthropic-api-key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,}")),
+    ("openai-api-key", re.compile(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}")),
+    ("stripe-live-key", re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}")),
+    ("sendgrid-api-key", re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b")),
+    ("npm-token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
+    ("twilio-api-key", re.compile(r"\bSK[0-9a-f]{32}\b")),
+    ("private-key", re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----")),
+]
+
+INJECTION = re.compile(
+    r"(?i)\b(ignore|disregard|forget)\b.{0,30}\b(previous|prior|above|earlier)\b.{0,20}"
+    r"\b(instructions?|prompts?|rules)\b|\byou are now\b|<\s*/?\s*system\s*>")
+EXCERPT_FILES, EXCERPT_LINES = 5, 80
+
+
+def redact(text, counter):
+    """Replace secrets with <redacted:rule>; count hits per rule in counter."""
+    for name, rx in SECRET_RULES:
+        text, n = rx.subn("<redacted:%s>" % name, text)
+        if n:
+            counter[name] = counter.get(name, 0) + n
+    return text
+
+
+def check_injection(text, where, warnings):
+    """Warn once per source (e.g. 'commit abc1234', 'diff of f.py') on injection-like text."""
+    msg = "possible prompt injection in %s" % where
+    if text and INJECTION.search(text) and msg not in warnings:
+        warnings.append(msg)
+
+
+def numstat(root, merge_base):
+    raw = git(root, "diff", "--numstat", "-z", "--no-color", "--no-ext-diff",
+              "%s..HEAD" % merge_base) or ""
+    parts, files, i = raw.split("\0"), [], 0
+    while i < len(parts):
+        head = parts[i].split("\t", 2)
+        i += 1
+        if len(head) < 3:
+            continue
+        path = head[2]
+        if not path:  # rename or copy: empty path, then old and new
+            path = parts[i + 1] if i + 1 < len(parts) else ""
+            i += 2
+        binary = head[0] == "-"
+        files.append({"path": path, "added": 0 if binary else int(head[0]),
+                      "deleted": 0 if binary else int(head[1]), "binary": binary})
+    return files
+
+
+def diff_info(root, merge_base, cap):
+    rng = "%s..HEAD" % merge_base
+    files = numstat(root, merge_base)
+    stat = git(root, "diff", "--stat", "--no-color", "--no-ext-diff", rng) or ""
+    text = git(root, "diff", "--no-color", "--no-ext-diff", rng) or ""
+    if len(text.encode("utf-8")) <= cap:
+        return {"files": files, "stat": stat, "text": text, "truncated": False, "excerpts": []}
+    top = sorted((f for f in files if not f["binary"]),
+                 key=lambda f: f["added"] + f["deleted"], reverse=True)[:EXCERPT_FILES]
+    excerpts = []
+    for f in top:
+        d = git(root, "diff", "--no-color", "--no-ext-diff", rng, "--", f["path"]) or ""
+        excerpts.append({"path": f["path"], "lines": "\n".join(d.splitlines()[:EXCERPT_LINES])})
+    return {"files": files, "stat": stat, "text": None, "truncated": True, "excerpts": excerpts}
+
+
+DIFF_HEADER = re.compile(r"^diff --git a/.* b/(.*)$", re.M)
+
+
+def sanitize_diff(info, counter, warnings):
+    """Redact in place and warn on injection text, per file where the path is known."""
+    info["stat"] = redact(info["stat"], counter)
+    if info["text"] is not None:
+        info["text"] = redact(info["text"], counter)
+        marks = list(DIFF_HEADER.finditer(info["text"]))
+        for k, m in enumerate(marks):
+            end = marks[k + 1].start() if k + 1 < len(marks) else len(info["text"])
+            check_injection(info["text"][m.start():end], "diff of " + m.group(1), warnings)
+    for e in info["excerpts"]:
+        e["lines"] = redact(e["lines"], counter)
+        check_injection(e["lines"], "diff of " + e["path"], warnings)
+
 
 def main(argv):
     try:
@@ -238,6 +330,10 @@ def main(argv):
                     base=base_info)
     counts = (git(root, "rev-list", "--left-right", "--count", ref + "...HEAD") or "0\t0").split()
     commit_list, truncated = commits(root, mb)
+    redactions = {}
+    for c in commit_list:
+        c["subject"], c["body"] = redact(c["subject"], redactions), redact(c["body"], redactions)
+        check_injection(c["subject"] + "\n" + c["body"], "commit " + c["hash"][:7], warnings)
     dirty = bool(git(root, "status", "--porcelain"))
     if dirty:
         warnings.append("uncommitted changes are not included")
@@ -248,7 +344,10 @@ def main(argv):
                     "note": (BREAKING_FOOTER.search(c["body"]) or [None, None])[1] or None}
                    for c in commit_list if c["breaking"]])
     out.update(push_state(root, branch))
-    # Tasks 3-5 fill the remaining keys here.
+    info = diff_info(root, mb, config["diffSizeCap"])
+    sanitize_diff(info, redactions, warnings)
+    out.update(diff=info, redactions=redactions)
+    # Tasks 4-5 fill the remaining keys here.
     return out
 
 
