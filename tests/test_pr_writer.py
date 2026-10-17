@@ -278,9 +278,7 @@ def test_large_diff_truncated(repo):
 
 def test_binary_and_unicode_files(repo):
     repo.on("feat/x")
-    repo.commit("feat: bin\n\ncafé body".encode("latin-1").decode("latin-1"),
-                {"a b.txt": "x\n", "img.bin": b"\x00\xff"})
-    git(repo.root, "commit", "--amend", "-q", "-m", "feat: bin")
+    repo.commit("feat: bin", {"a b.txt": "x\n", "img.bin": b"\x00\xff"})
     out = run_script(repo.root)
     by = {f["path"]: f for f in out["diff"]["files"]}
     assert by["img.bin"]["binary"] is True
@@ -293,7 +291,25 @@ def test_latin1_commit_body(repo):
     git(repo.root, "add", "g.txt")
     subprocess.run(["git", "commit", "-q", "-F", "-"], cwd=repo.root, check=True,
                    env=ENV, input="feat: g\n\ncaf\xe9\n".encode("latin-1"))
-    assert run_script(repo.root)["ok"] is True
+    out = run_script(repo.root)
+    assert out["ok"] is True
+    assert out["commits"][0]["subject"] == "feat: g"
+    assert out["commits"][0]["body"].startswith("caf")
+
+
+@pytest.mark.parametrize("with_end", [True, False])
+def test_private_key_block_redacted(repo, with_end):
+    body = ["Zm9vYmFyYmF6cXV4" + "AAAA%02d" % i for i in range(4)]
+    key = "-----BEGIN RSA " + "PRIVATE KEY-----\n" + "\n".join(body)
+    if with_end:
+        key += "\n-----END RSA " + "PRIVATE KEY-----"
+    repo.on("feat/x")
+    repo.commit("feat: k\n\n" + key, {"k.pem": key + "\n"})
+    r = subprocess.run([sys.executable, str(SCRIPT)], cwd=repo.root, capture_output=True,
+                       text=True, env=ENV)
+    for line in body:
+        assert line not in r.stdout
+    assert json.loads(r.stdout)["redactions"]["private-key"] >= 2
 
 
 def test_secret_redacted(repo):

@@ -198,8 +198,8 @@ def commits(root, merge_base):
         out.append(parse_commit(h.strip(), s, b.strip()))
     return out[:COMMIT_CAP], len(out) > COMMIT_CAP
 
-# copied from secret-scan-guard/hooks/secret_scan.py; keep in sync (see CLAUDE.md)
-# (the high-confidence rules from patterns.py, which block there)
+# copied from secret-scan-guard/hooks/patterns.py; keep in sync (see CLAUDE.md)
+# (the high-confidence rules, which block there)
 SECRET_RULES = [
     ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
@@ -223,8 +223,19 @@ INJECTION = re.compile(
 EXCERPT_FILES, EXCERPT_LINES = 5, 80
 
 
+# A private key's header rule only matches one line; cover the whole block. Without an END
+# line, take the run of base64-looking lines (optionally with a diff +/-/space prefix).
+KEY_BLOCK = re.compile(
+    SECRET_RULES[-1][1].pattern
+    + r"(?:.*?-----END (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----|(?:\r?\n[+\- ]?[A-Za-z0-9+/=]+)*)",
+    re.S)
+
+
 def redact(text, counter):
     """Replace secrets with <redacted:rule>; count hits per rule in counter."""
+    text, n = KEY_BLOCK.subn("<redacted:private-key>", text)
+    if n:
+        counter["private-key"] = counter.get("private-key", 0) + n
     for name, rx in SECRET_RULES:
         text, n = rx.subn("<redacted:%s>" % name, text)
         if n:
