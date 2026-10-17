@@ -683,6 +683,17 @@ def test_missing_base_hint_mentions_positional(repo):
     assert "Pass the base branch" in msg
 
 
+def test_pushed_when_upstream_is_base(repo):
+    repo.remote()
+    git(repo.root, "fetch", "-q", "origin")
+    git(repo.root, "switch", "-q", "--track", "-c", "feat/x", "origin/main")
+    repo.commit("feat: a")
+    git(repo.root, "push", "-q", "origin", "feat/x")
+    out = run_script(repo.root)
+    assert out["upstream"] == "origin/feat/x"
+    assert out["pushed"] is True
+
+
 def test_base_strips_origin_prefix(repo):
     repo.remote()
     feature(repo, "feat: a")

@@ -170,6 +170,9 @@ def resolve_base(root, arg):
 
 def push_state(root, branch):
     upstream = git(root, "rev-parse", "--abbrev-ref", "-q", "@{u}")
+    # A branch started from origin/main tracks it; that upstream says nothing about a push.
+    if git(root, "config", "--get", "branch.%s.merge" % branch) != "refs/heads/" + branch:
+        upstream = None
     if not upstream and git(root, "rev-parse", "--verify", "-q", "origin/" + branch):
         upstream = "origin/" + branch
     sha = git(root, "rev-parse", "--verify", "-q", upstream) if upstream else None
