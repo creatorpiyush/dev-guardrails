@@ -53,23 +53,26 @@ Never include secrets, tokens, or internal hostnames. If `redactions` is non-emp
 
 ## 7. Show and wait
 
-Show the title, the full body, and the open questions (unticked checkboxes, missing testing info, truncation, redactions). Say whether the PR will be a draft (`draft` already accounts for `--ready`, `--draft`, and config). Then wait for an explicit yes. Do nothing else until you get it.
+Show the title, the full body, and the open questions (unticked checkboxes, missing testing info, truncation, redactions).
+
+The PR can't be created from here when `host.cli` is null, `host.authenticated` is false, or `warnings` contains "branch or base name contains a single quote; create the PR manually". In that case, say which of these applies and go straight to step 10. Don't ask for a yes, and don't check `pushed`.
+
+Otherwise, say whether the PR will be a draft (`draft` already accounts for `--ready`, `--draft`, and config). Then wait for an explicit yes. Do nothing else until you get it.
 
 ## 8. Create the PR (after yes)
 
 1. If `pushed` is false, stop. Tell the user to push the branch themselves (git-workflow-guard will ask them to confirm). Mention `note` and `upstream` if useful. **Never push.**
-2. If `host.cli` is null or `host.authenticated` is false, go to step 10.
-3. Write the body to `body_file` with the Write tool. **Never put the body in a shell string.**
-4. Run, with B as `base.name`, H as `branch`, and `--draft` only when `draft` is true (it already accounts for `--ready` and `--draft`):
-   - gh: `gh pr create --base B --head H --title T --body-file F [--draft]`
-   - glab: `glab mr create --source-branch H --target-branch B --title T --description-file F [--draft] --yes`
+2. Write the body to `body_file` with the Write tool. **Never put the body in a shell string.**
+3. Run, with B as `base.name`, H as `branch`, F as `body_file`, T as the title from step 6, and `--draft` only when `draft` is true (it already accounts for `--ready` and `--draft`):
+   - gh: `gh pr create --base 'B' --head 'H' --title 'T' --body-file 'F' [--draft]`
+   - glab: `glab mr create --source-branch 'H' --target-branch 'B' --title 'T' --description-file 'F' [--draft] --yes`
 
-   Pass T as the single-quoted, quote-free title from step 6, e.g. `--title 'feat(x): add y'`. The permission prompt for this command is expected.
+   Single-quote B, H, F, and T exactly as shown, with nothing escaped. None of them contains `'`: step 7 checked B and H, step 6 checked T, and F is a generated temp path. The permission prompt for this command is expected.
 
 ## 9. After creation
 
-Print the PR URL. Offer `codeowners.owners` as reviewers and any `config.labels` that fit. Do nothing more without asking.
+Print the PR URL. Offer `codeowners.owners` as reviewers. If `config.labels` has a key equal to the title's Conventional type (such as `feat`), offer that label, `config.labels[<type>]`. Do nothing more without asking.
 
-## 10. No authenticated CLI
+## 10. Paste-ready output
 
 Print the title and body ready to paste, and stop.
