@@ -1083,7 +1083,9 @@ def main(argv=None):
         result = scan(sys.argv[1:] if argv is None else argv, os.getcwd())
     except Exception as e:  # always print JSON
         result = fail("internal-error", "{}: {}".format(type(e).__name__, e))
-    sys.stdout.write(json.dumps(result, indent=1, ensure_ascii=False) + "\n")
+    # UTF-8 bytes, not the console encoding: cp1252 on Windows can't encode emoji
+    sys.stdout.buffer.write((json.dumps(result, indent=1, ensure_ascii=False) + "\n").encode("utf-8"))
+    sys.stdout.flush()
     return 0
 
 

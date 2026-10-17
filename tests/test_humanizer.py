@@ -66,7 +66,7 @@ def repo(tmp_path):
 
         def scan(self, *args, cwd=None):
             r = subprocess.run([sys.executable, str(SCAN), *args], cwd=str(cwd or path),
-                               capture_output=True, text=True, timeout=60)
+                               capture_output=True, text=True, encoding="utf-8", timeout=60)
             assert r.returncode == 0, r.stderr
             return json.loads(r.stdout)
 
@@ -467,6 +467,15 @@ def test_pathological_text_scans_quickly(repo):
     start = time.monotonic()
     assert repo.scan("big.md", "big.js")["ok"]
     assert time.monotonic() - start < 20  # regexes stay linear
+
+
+def test_output_is_utf8_whatever_the_console_encoding(repo):
+    repo.write("NOTES.md", "## \u2705 Done \U0001f680\n")
+    r = subprocess.run([sys.executable, str(SCAN), "NOTES.md"], cwd=str(repo.root),
+                       capture_output=True, timeout=60,
+                       env=dict(os.environ, PYTHONIOENCODING="cp1252"))  # Windows CI default
+    assert r.returncode == 0, r.stderr
+    assert "\u2705" in json.loads(r.stdout.decode("utf-8"))["regions"][0]["text"]
 
 
 def test_empty_repo_is_json(repo):

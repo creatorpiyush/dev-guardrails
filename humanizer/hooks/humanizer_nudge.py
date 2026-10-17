@@ -188,7 +188,7 @@ def run_scan(root):
     try:
         limit = float(os.environ.get("HUMANIZER_SCAN_TIMEOUT", SCAN_TIMEOUT))
         r = subprocess.run([sys.executable, SCAN, "--staged"], cwd=root, capture_output=True,
-                           text=True, timeout=limit)
+                           text=True, encoding="utf-8", timeout=limit)
         result = json.loads(r.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
