@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -173,6 +174,11 @@ def test_comment_extractors(repo, case):
 def test_markdown_skips_fenced_and_inline_code_and_urls(repo):
     repo.write("doc.md", "# Doc\n\nRun `delve --robust` from https://example.com/delve.\n\n"
                          "```python\n# it is important to note\n```\n\n~~~\ndelve\n~~~\n")
+    assert repo.scan("doc.md")["regions"] == []
+
+
+def test_quoted_phrases_are_skipped(repo):
+    repo.write("doc.md", 'It flags phrases like "delve" and “a testament to”.\n')
     assert repo.scan("doc.md")["regions"] == []
 
 
@@ -453,6 +459,14 @@ def test_not_a_repo_is_json(repo, tmp_path):
     assert repo.scan(cwd=outside)["error"]["code"] == "not-a-repo"
     (outside / "a.md").write_text("A seamless page.\n")
     assert ids(repo.scan("a.md", cwd=outside)) == ["phrase.seamless"]
+
+
+def test_pathological_text_scans_quickly(repo):
+    repo.write("big.md", "# x" + " " * 50000 + "y\n" + "-" + " " * 50000 + "x\n")
+    repo.write("big.js", "/*" + "\n" * 50000 + "*/\nrun();\n")
+    start = time.monotonic()
+    assert repo.scan("big.md", "big.js")["ok"]
+    assert time.monotonic() - start < 20  # regexes stay linear
 
 
 def test_empty_repo_is_json(repo):

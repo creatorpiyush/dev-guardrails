@@ -84,7 +84,7 @@ PHRASES = [
                            r"|\b(?:can|may|might|could) help to\b|\bit (?:seems|appears) that\b"),
 ]
 ENSURE_THAT = re.compile(r"\bensur(?:e|es|ing) that\b", re.I)
-TUTORIAL = re.compile(r"(?:^|[.!?]\s+)\s*(?:let's|let’s|let us|now,? we|first,? we|next,? we|"
+TUTORIAL = re.compile(r"(?:^|[.!?])[ \t]*(?:let's|let’s|let us|now,? we|first,? we|next,? we|"
                       r"then,? we|here,? we|we will now|we'll now|we're going to)\b", re.I | re.M)
 
 HYPE = set("""powerful robust seamless seamlessly comprehensive cutting-edge innovative revolutionary
@@ -100,18 +100,18 @@ HEDGES = {"may", "might", "could", "possibly", "potentially", "perhaps", "somewh
           "generally", "typically", "likely"}
 
 EMOJI = re.compile("[☀-➿⬀-⯿\U0001f000-\U0001faff]")
-BULLET = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)")
-HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
+BULLET = re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.*)")
+HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+(.*)")  # only the start matters here
 BOLD_LABEL = re.compile(r"(?:\*\*|__)[^*_]+(?:\*\*|__)")
 
 # Comments that tools read. Never flagged.
 DIRECTIVE = re.compile(
     r"\bnoqa\b|type:\s*ignore|\bpragma\b|\bpylint:|\bmypy:|\bpyright:|\bruff:|\bisort:|"
-    r"\bfmt:\s*(?:off|on|skip)|eslint-(?:disable|enable|env)|^\s*eslint\b|^\s*global\s|"
+    r"\bfmt:\s*(?:off|on|skip)|eslint-(?:disable|enable|env)|^[ \t]*eslint\b|^[ \t]*global\s|"
     r"prettier-ignore|@ts-(?:expect-error|ignore|nocheck|check)|istanbul ignore|c8 ignore|"
-    r"\bjshint\b|\btslint:|\brubocop:|\bnolint\b|NOLINT|clang-format|shellcheck\s|^\s*go:|"
-    r"^\s*\+build|\bnosec\b|NOSONAR|^\s*#?(?:end)?region\b|<reference|^\s*!|-\*-|"
-    r"coding[:=]\s*[-\w.]+|^\s*vim?:|\bcspell:|\bspell-checker:|markdownlint|"
+    r"\bjshint\b|\btslint:|\brubocop:|\bnolint\b|NOLINT|clang-format|shellcheck\s|^[ \t]*go:|"
+    r"^[ \t]*\+build|\bnosec\b|NOSONAR|^[ \t]*#?(?:end)?region\b|<reference|^[ \t]*!|-\*-|"
+    r"coding[:=]\s*[-\w.]+|^[ \t]*vim?:|\bcspell:|\bspell-checker:|markdownlint|"
     r"sourceMappingURL|@flow\b|@jsx\b|@license\b|@preserve\b|\bcoverage:|\blgtm\b",
     re.I | re.M)
 LICENSE = re.compile(r"copyright|\blicen[cs]e|spdx-license-identifier|all rights reserved", re.I)
@@ -150,10 +150,11 @@ REASON = re.compile(r"\b(?:because|since|so that|otherwise|avoid|avoids|workarou
                     r"requires|expects?)\b", re.I)
 WORD = re.compile(r"[A-Za-z][A-Za-z'’-]*")
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-SENT_END = re.compile(r"(?<=[.!?])\s+|\n(?=\s*(?:[-*+]|\d+[.)])\s)")
+SENT_END = re.compile(r"(?<=[.!?])\s+|\n(?=[ \t]*(?:[-*+]|\d+[.)])[ \t])")
+# inline code, URLs, link targets, HTML tags, reference links, and short quotes
 MASKS = [re.compile(p, re.M) for p in (
     r"`[^`\n]+`", r"<?https?://[^\s)>\]]+>?", r"\]\([^)\s]*\)", r"<[^>\n]+>",
-    r"^\s*\[[^\]\n]*\]:\s*\S+")]
+    r"^[ \t]*\[[^\]\n]*\]:[ \t]*\S+", r"\"[^\"\n]{1,80}\"", r"“[^”\n]{1,80}”")]
 
 # ---------------------------------------------------------------- files
 
@@ -542,7 +543,7 @@ def python_regions(text):
             if k == first:
                 s = re.sub(r"^[rRuUbBfF]*(?:\"\"\"|'''|\"|')", "", s)
             if k == last:
-                s = re.sub(r"(?:\"\"\"|'''|\"|')\s*$", "", s)
+                s = re.sub(r"(?:\"\"\"|'''|\"|')$", "", s.rstrip())
             lines.append((k, s.strip()))
         if not keep_comment([t for _, t in lines], first):
             continue
@@ -638,7 +639,7 @@ def extract(text, rel):
 
 
 def mask(text):
-    """Blank out inline code, URLs, link targets, and HTML tags, keeping offsets."""
+    """Blank out MASKS matches, keeping offsets. Quoted text is someone's words, not ours."""
     for rx in MASKS:
         text = rx.sub(lambda m: " " * len(m.group()), text)
     return text
