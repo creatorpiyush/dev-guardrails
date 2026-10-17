@@ -91,13 +91,16 @@ class _Parser(argparse.ArgumentParser):
 
 def parse_args(argv):
     p = _Parser(prog="collect_context.py", add_help=False)
+    p.add_argument("base_pos", nargs="?")
     p.add_argument("--base")
     p.add_argument("--check-title", dest="check_title")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--ready", action="store_true")
     g.add_argument("--draft", action="store_true")
     a = p.parse_args(argv)
-    return a.base, a.ready, a.draft, a.check_title
+    if a.base and a.base_pos and a.base != a.base_pos:
+        raise ValueError("two different base branches: %s and %s" % (a.base_pos, a.base))
+    return a.base or a.base_pos, a.ready, a.draft, a.check_title
 
 
 def _valid(key, val):
@@ -540,7 +543,7 @@ def main(argv):
     if not base_info:
         return fail("base-not-found",
                     "Base branch '%s' not found." % base if base
-                    else "No base branch found (tried origin/HEAD, main, master). Pass --base.",
+                    else "No base branch found (tried origin/HEAD, main, master). Pass the base branch, e.g. main.",
                     warnings=warnings, repo_root=root, branch=branch, config=config)
     ref = base_info["ref"]
     mb = git(root, "merge-base", ref, "HEAD")

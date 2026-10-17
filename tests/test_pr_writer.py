@@ -658,3 +658,26 @@ def test_main_host_without_cli(repo):
     set_origin(repo, "git@github.com:o/r.git")
     out = tpl(repo)
     assert out["host"]["cli"] is None and out["host"]["available"] == {"gh": False, "glab": False}
+
+
+# ---- final-review fixes ----
+def test_positional_base(repo):
+    feature(repo, "feat: a")
+    out = run_script(repo.root, "main")
+    assert out["base"] == {"name": "main", "ref": "main", "source": "argument"}
+    out = run_script(repo.root, "main", "--ready")
+    assert out["base"]["name"] == "main" and out["draft"] is False
+
+
+def test_positional_and_flag_base_conflict(repo):
+    feature(repo, "feat: a")
+    assert run_script(repo.root, "main", "--base", "dev")["error"]["code"] == "bad-arguments"
+    assert run_script(repo.root, "main", "--base", "main")["ok"] is True
+
+
+def test_missing_base_hint_mentions_positional(repo):
+    repo.on("feat/x")
+    git(repo.root, "branch", "-m", "main", "trunk-x")
+    repo.commit("feat: a")
+    msg = run_script(repo.root)["error"]["message"]
+    assert "Pass the base branch" in msg
