@@ -11,3 +11,5 @@ allowed-tools: Read, Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/scan.py"), Bash
 Read `${CLAUDE_PLUGIN_ROOT}/skills/humanizer/SKILL.md` and follow it step by step. Use these arguments for its scan step, verbatim: `$ARGUMENTS` (empty means uncommitted changes).
 
 Load that file by its path, not by skill name. Another installed plugin may also have a skill named `humanizer`.
+
+That file says `${CLAUDE_PLUGIN_ROOT}`, which is not expanded when you read it. Wherever it appears, use `${CLAUDE_PLUGIN_ROOT}` exactly as written here, so the script path matches this skill's allowed tools.
