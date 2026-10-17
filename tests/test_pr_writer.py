@@ -382,11 +382,15 @@ def test_title_several_commits(repo):
     assert (t["prefix"], t["suggested"], t["is_suggestion"]) == ("feat(api): ", None, True)
 
 
-def test_title_scope_dropped_when_mixed_and_tie_order(repo):
+def test_title_scope_dropped_when_mixed(repo):
     t = on_branch(repo, "feat/x", "fix(a): a", "feat(a): b", "feat(b): c", "wip stuff")["title"]
     assert t["prefix"] == "feat: "
-    t = on_branch(repo, "feat/y", "fix: a", "feat: b")["title"]
-    assert t["prefix"] == "feat: "
+
+
+@pytest.mark.parametrize("msgs", [["docs: a", "fix: b"], ["fix: a", "docs: b"]])
+def test_title_tie_break_uses_types_order(repo, msgs):
+    t = on_branch(repo, "feat/tie", *msgs)["title"]
+    assert t["prefix"] == "fix: "
 
 
 def test_title_no_conventional_commit(repo):
