@@ -614,3 +614,138 @@ def test_missing_named_session_has_no_log(repo, home, hook_env):
     write_log(home, repo, [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}], sid="other")
     out = run_collect(repo, "--session", "ghost", env=hook_env)
     assert out["session"] == {"id": None, "log_path": None, "events": 0}
+
+
+# -- impact signals ----------------------------------------------------------
+
+def impact(repo, base):
+    return run_collect(repo, "--since", base)["impact"]
+
+
+def sig(items, name):
+    return [i for i in items if i["signal"] == name]
+
+
+def test_signal_public_api_and_signature(repo):
+    base = commit(repo, {"svc.py": "def keep(a):\n    pass\n\ndef old_fn():\n    pass\n"}, "b")
+    (repo / "svc.py").write_text(
+        "def keep(a, b):\n    pass\n\ndef _private():\n    pass\n\n"
+        "class NewThing:\n    pass\n")
+    items = impact(repo, base)
+    api = {(i["file"], i["evidence"]) for i in sig(items, "public-api")}
+    assert ("svc.py", "+NewThing") in api and ("svc.py", "-old_fn") in api
+    assert not any("_private" in i["evidence"] for i in items)
+    assert [i["evidence"] for i in sig(items, "signature")] == ["keep"]
+
+
+def test_signal_migration(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / "db" / "migrations").mkdir(parents=True)
+    (repo / "db" / "migrations" / "0001_init.py").write_text("x = 1\n")
+    (repo / "q.sql").write_text("select 1;\n")
+    files = {i["file"] for i in sig(impact(repo, base), "migration")}
+    assert files == {"db/migrations/0001_init.py", "q.sql"}
+
+
+def test_signal_dependency_versions(repo):
+    base = commit(repo, {"requirements.txt": "requests==2.31.0\nflask==2.0\n"}, "b")
+    (repo / "requirements.txt").write_text("requests==2.32.0\nrich>=13\n")
+    ev = {i["evidence"] for i in sig(impact(repo, base), "dependency")}
+    assert ev == {"requests 2.31.0→2.32.0", "+rich 13", "-flask"}
+
+
+def test_signal_lockfile(repo):
+    base = commit(repo, {"go.sum": "a\n"}, "b")
+    (repo / "go.sum").write_text("b\n")
+    items = impact(repo, base)
+    assert [i["file"] for i in sig(items, "lockfile")] == ["go.sum"]
+    assert not sig(items, "config") and not sig(items, "dependency")
+
+
+def test_signal_ci(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yml").write_text("on: push\n")
+    items = impact(repo, base)
+    assert [i["file"] for i in sig(items, "ci")] == [".github/workflows/ci.yml"]
+    assert not sig(items, "config")
+
+
+def test_signal_deleted_file(repo):
+    base = commit(repo, {"gone.py": "x = 1\n", "k.py": "y = 1\n"}, "b")
+    (repo / "gone.py").unlink()
+    assert [i["file"] for i in sig(impact(repo, base), "deleted")] == ["gone.py"]
+
+
+def test_signal_env_var_names_only(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / "app.py").write_text(
+        'import os\nK = os.environ["API_KEY"]\nH = os.getenv("HOST", "S3NTINEL")\n')
+    (repo / "app.js").write_text("const p = process.env.PORT\n")
+    (repo / "Dockerfile").write_text("FROM x\nENV MODE=S3NTINEL\nARG BUILD_ID\n")
+    out = run_collect(repo, "--since", base)
+    names = {i["evidence"] for i in sig(out["impact"], "env-var")}
+    assert names == {"API_KEY", "HOST", "PORT", "MODE", "BUILD_ID"}
+    assert "S3NTINEL" not in json.dumps(out)
+    assert sig(out["impact"], "infra")
+
+
+def test_blast_radius_python_and_js(repo):
+    base = commit(repo, {
+        "pkg/__init__.py": "", "pkg/core.py": "def f():\n    pass\n",
+        "pkg/user.py": "from pkg.core import f\n",
+        "other.py": "import pkg.core\n", "noise.py": "# core mention\nx = 1\n",
+        "web/util.js": "export const u = 1\n",
+        "web/app.js": "import { u } from './util'\n",
+        "web/sub/x.ts": "import u from '../util.js'\n",
+    }, "b")
+    (repo / "pkg" / "core.py").write_text("def f(x):\n    pass\n")
+    (repo / "web" / "util.js").write_text("export const u = 2\n")
+    imp = sig(impact(repo, base), "importer")
+    got = {(i["file"], i["evidence"]) for i in imp}
+    assert got == {("pkg/core.py", "pkg/user.py"), ("pkg/core.py", "other.py"),
+                   ("web/util.js", "web/app.js"), ("web/util.js", "web/sub/x.ts")}
+
+
+def test_blast_radius_cap_and_changed_files_excluded(repo):
+    files = {"lib.py": "x = 1\n", "also.py": "import lib\n"}
+    files.update({"u%02d.py" % i: "import lib\n" for i in range(25)})
+    base = commit(repo, files, "b")
+    (repo / "lib.py").write_text("x = 2\n")
+    (repo / "also.py").write_text("import lib\ny = 1\n")
+    imp = sig(impact(repo, base), "importer")
+    assert len(imp) == 20 and all(i["evidence"] != "also.py" for i in imp)
+    assert all(i.get("truncated") is True for i in imp)
+
+
+def test_secret_file_diff_not_read(repo):
+    base = commit(repo, {".env": "A=1\n"}, "b")
+    (repo / ".env").write_text("A=S3NTINEL\nAPI=os.environ['LEAK']\n")
+    out = run_collect(repo, "--since", base)
+    assert [(i["signal"], i["file"]) for i in out["impact"]] == [("config", ".env")]
+    assert "S3NTINEL" not in json.dumps(out) and "LEAK" not in json.dumps(out)
+
+
+def test_untracked_secret_and_source_files(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / ".env.local").write_text("X=S3NTINEL\n")
+    (repo / "new.py").write_text("def fresh():\n    pass\n")
+    out = run_collect(repo, "--since", base)
+    assert "S3NTINEL" not in json.dumps(out)
+    assert ("new.py", "+fresh") in {(i["file"], i["evidence"])
+                                    for i in sig(out["impact"], "public-api")}
+
+
+def test_failed_file_diff_warns_not_fails(repo, monkeypatch):
+    base = commit(repo, {"a.py": "def f():\n    pass\n"}, "b")
+    (repo / "a.py").write_text("def g():\n    pass\n")
+    real = collect.git
+
+    def flaky(cwd, *args):
+        return None if args[:2] == ("diff", "-U0") else real(cwd, *args)
+
+    monkeypatch.setattr(collect, "git", flaky)
+    warnings = []
+    items = collect.impact_signals(str(repo), base,
+                                   [{"path": "a.py", "status": "modified"}], warnings)
+    assert not sig(items, "public-api") and any("a.py" in w for w in warnings)

@@ -7,9 +7,11 @@ reported as {"ok": false, "error": {"code", "message"}}. Never writes files.
 Standard library only. Python 3.9+.
 """
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
+import posixpath
 import re
 import stat
 import subprocess
@@ -253,6 +255,264 @@ def change_facts(root, since):
     }
 
 
+# -- impact signals ----------------------------------------------------------
+
+# Never read: matched on the lowercased basename. Listed by path only.
+SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "*.p12", "credentials.json")
+SECRET_ALLOW = (".env.example", ".env.sample", ".env.template")
+MANIFESTS = ("package.json", "pyproject.toml", "requirements*.txt", "setup.py", "setup.cfg",
+             "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml", "build.gradle*")
+LOCKFILES = ("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "uv.lock",
+             "Cargo.lock", "go.sum", "Gemfile.lock", "composer.lock")
+CI_PATHS = (".github/workflows/*", ".gitlab-ci.yml", ".circleci/*", "Jenkinsfile",
+            "azure-pipelines.yml", ".buildkite/*")
+INFRA_PATHS = ("Dockerfile*", "docker-compose*", "compose.y*ml", "*.tf", "Chart.yaml",
+               "k8s/*", "helm/*")
+MIGRATION_PATHS = ("*migrations/*", "*migrate/*", "*alembic/*", "schema.prisma",
+                   "*/schema.prisma", "db/schema.rb", "*/db/schema.rb", "*.sql")
+CONFIG_EXTS = (".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf")
+AUTH_WORDS = re.compile(
+    r"auth|authn|authz|authentication|authorization|permissions?|rbac|acl|oauth2?|login|"
+    r"sessions?|security|polic(?:y|ies)|codeowners", re.I)
+MAX_IMPORTERS = 20
+LANG_EXTS = {
+    "py": (".py",), "js": (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"), "go": (".go",),
+    "rs": (".rs",), "public": (".java", ".kt", ".cs"),
+}
+# (regex, name group, rest group or None); matched against one diff line without its +/-.
+API_PATTERNS = {
+    "py": re.compile(r"^(?:async\s+def|def|class)\s+([A-Za-z]\w*)(.*)"),
+    "js": re.compile(r"^export\s+(?:default\s+)?(?:async\s+)?(?:function\*?|class|const|let|var|"
+                     r"interface|type|enum)\s+(\w+)(.*)"),
+    "go": re.compile(r"^func\s+([A-Z]\w*)(.*)"),
+    "rs": re.compile(r"^pub\s+(?:async\s+)?(?:fn|struct|enum|trait)\s+(\w+)(.*)"),
+    "public": re.compile(r"^\s*public\s+(?:[^(={;]*?\s)?(\w+)\s*([(={;].*|$)"),
+}
+ENV_PATTERNS = [re.compile(p) for p in (
+    r"os\.environ\[\s*['\"](\w+)", r"os\.getenv\(\s*['\"](\w+)", r"environ\.get\(\s*['\"](\w+)",
+    r"process\.env\.(\w+)", r"process\.env\[\s*['\"](\w+)", r"^\s*(?:ENV|ARG)\s+(\w+)")]
+DEP_NON_NAMES = {"name", "version", "description", "main", "license", "author"}
+VERSION = re.compile(r"[\^~<>=!v]*\d")
+DEP_JSON = re.compile(r'^\s*"([^"]+)"\s*:\s*"([^"]*)"\s*,?\s*$')
+DEP_PIP = re.compile(r"""^\s*["']?([A-Za-z0-9_.\-]+)\s*(?:==|>=|<=|~=|!=|>|<)\s*([^\s;#,"']+)""")
+DEP_TOML = re.compile(r'^\s*([A-Za-z0-9_.\-]+)\s*=\s*"([^"]*)"')
+DEP_GO = re.compile(r"^\s*(?:require\s+)?([\w.\-]+\.[\w.\-/]+)\s+(v\d[\w.\-+]*)")
+
+
+def matches(path, patterns):
+    base = posixpath.basename(path)
+    return any(fnmatch.fnmatchcase(path, p) or fnmatch.fnmatchcase(base, p) for p in patterns)
+
+
+def is_secret(path):
+    name = posixpath.basename(path).lower()
+    return name not in SECRET_ALLOW and any(fnmatch.fnmatchcase(name, p) for p in SECRET_NAMES)
+
+
+def read_regular(path):
+    """Text of a small regular, non-binary file, else None (same bounds as count_lines)."""
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_COUNT_BYTES:
+            return None
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    return None if b"\0" in data[:8000] else data.decode("utf-8", "replace")
+
+
+def diff_lines(root, since, f, warnings):
+    """(added, removed) line lists, or None when content can't be read.
+    Untracked files have no git diff, so they are read as all-added."""
+    paths = [p for p in (f.get("old_path"), f["path"]) if p]
+    out = git(root, "diff", "-U0", "--no-ext-diff", "--no-textconv", "-M", since, "--", *paths)
+    if out is None:
+        warnings.append("impact: git diff failed for %s; content signals skipped" % f["path"])
+        return None
+    if not out and f["status"] == "added":
+        text = read_regular(os.path.join(root, f["path"]))
+        return (text.splitlines(), []) if text else None
+    add, rem = [], []
+    for line in out.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            add.append(line[1:])
+        elif line.startswith("-") and not line.startswith("---"):
+            rem.append(line[1:])
+    return add, rem
+
+
+def lang_of(path):
+    ext = posixpath.splitext(path)[1].lower()
+    return next((k for k, exts in LANG_EXTS.items() if ext in exts), None)
+
+
+def api_names(lang, lines):
+    names = {}
+    for line in lines:
+        m = API_PATTERNS[lang].match(line)
+        if m:
+            names[m.group(1)] = m.group(2).strip()
+    return names
+
+
+def dep_versions(lines):
+    deps = {}
+    for line in lines:
+        for rx in (DEP_JSON, DEP_PIP, DEP_TOML, DEP_GO):
+            m = rx.match(line)
+            if m and m.group(1) not in DEP_NON_NAMES and (
+                    rx is DEP_PIP or VERSION.match(m.group(2))):
+                deps[m.group(1)] = m.group(2)
+                break
+    return deps
+
+
+def content_signals(path, add, rem):
+    """Yield (signal, evidence) from changed lines; evidence is derived facts only."""
+    lang = lang_of(path)
+    if lang:
+        a, r = api_names(lang, add), api_names(lang, rem)
+        for n in sorted(set(a) - set(r)):
+            yield "public-api", "+" + n
+        for n in sorted(set(r) - set(a)):
+            yield "public-api", "-" + n
+        for n in sorted(set(a) & set(r)):
+            if a[n] != r[n] and a[n].startswith("(") and r[n].startswith("("):
+                yield "signature", n
+    if matches(path, MANIFESTS):
+        new, old = dep_versions(add), dep_versions(rem)
+        found = False
+        for n in sorted(set(new) | set(old)):
+            found = True
+            if n in new and n in old:
+                if new[n] != old[n]:
+                    yield "dependency", "%s %s→%s" % (n, old[n], new[n])
+            elif n in new:
+                yield "dependency", "+%s %s" % (n, new[n])
+            else:
+                yield "dependency", "-" + n
+        if not found:
+            yield "dependency", "manifest changed"
+    names = sorted({m.group(1) for line in add + rem for rx in ENV_PATTERNS
+                    for m in [rx.search(line)] if m})
+    for n in names:
+        yield "env-var", n
+
+
+def import_matcher(f):
+    """(grep stem, predicate(importer_path, text)) for a changed source file, or None."""
+    path, lang = f["path"], lang_of(f["path"])
+    stem = posixpath.splitext(posixpath.basename(path))[0]
+    if lang == "py":
+        parts = posixpath.splitext(path)[0].split("/")
+        if parts[-1] == "__init__":
+            parts = parts[:-1]
+        if not parts:
+            return None
+        stem = parts[-1]
+        mods = [".".join(parts[i:]) for i in range(len(parts))]
+        rx = []
+        for m in mods:
+            rx.append(r"^\s*(?:from\s+%s\s+import|import\s+%s\b)" % ((re.escape(m),) * 2))
+            if "." in m:
+                parent = m.rsplit(".", 1)[0]
+                rx.append(r"^\s*from\s+%s\s+import\s+.*\b%s\b" % (re.escape(parent), re.escape(stem)))
+        rx = re.compile("|".join(rx), re.M)
+        # ponytail: bare-name suffixes can match an unrelated top-level module of the same name.
+        return stem, "py", lambda ip, text: bool(rx.search(text))
+    if lang == "js":
+        noext = posixpath.splitext(path)[0]
+        targets = {path, noext}
+        if stem == "index":
+            targets.add(posixpath.dirname(path))
+        spec = re.compile(r"""(?:from|import|require)\s*\(?\s*['"](\.{1,2}/[^'"]*|\.{1,2})['"]""")
+
+        def js(ip, text):
+            for s in spec.findall(text):
+                r = posixpath.normpath(posixpath.join(posixpath.dirname(ip), s))
+                if r in targets or posixpath.splitext(r)[0] in targets:
+                    return True
+            return False
+        return stem, "js", js
+    if lang == "go":
+        d = posixpath.dirname(path)
+        if not d:
+            return None
+        rx = re.compile(r'"[^"]*%s"' % re.escape(d))
+        return posixpath.basename(d), "go", lambda ip, text: (
+            posixpath.dirname(ip) != d and bool(rx.search(text)))
+    return None
+
+
+def importers(root, f, changed):
+    """(sorted importer paths capped at MAX_IMPORTERS, truncated) one hop out."""
+    m = import_matcher(f)
+    if not m:
+        return [], False
+    stem, lang, confirm = m
+    out = git(root, "grep", "-l", "-F", "-z", "--", stem)
+    found = []
+    for ip in sorted(set((out or "").split("\0"))):
+        if (not ip or ip in changed
+                or posixpath.splitext(ip)[1].lower() not in LANG_EXTS[lang] or is_secret(ip)):
+            continue
+        text = read_regular(os.path.join(root, ip))
+        if text and confirm(ip, text):
+            found.append(ip)
+    return found[:MAX_IMPORTERS], len(found) > MAX_IMPORTERS
+
+
+def path_signals(path, status):
+    """Yield (signal, evidence) decided by the path alone."""
+    if status == "deleted":
+        yield "deleted", "file removed"
+    if matches(path, LOCKFILES):
+        yield "lockfile", "lockfile changed"
+    if matches(path, CI_PATHS):
+        yield "ci", "CI config changed"
+    if matches(path, INFRA_PATHS):
+        yield "infra", "infra file changed"
+    if matches(path, MIGRATION_PATHS):
+        yield "migration", "migration or schema file"
+    base = posixpath.basename(path)
+    if (posixpath.splitext(path)[1].lower() in CONFIG_EXTS or base == ".env.example"
+            or base.startswith("settings.")) and not (
+            matches(path, MANIFESTS + LOCKFILES + CI_PATHS)):
+        yield "config", "config file changed"
+    segs = [t for seg in path.split("/") for t in re.split(r"[._\-]", seg) if t]
+    if any(AUTH_WORDS.fullmatch(t) for t in segs):
+        yield "auth", "auth-related path"
+
+
+def impact_signals(root, since, files, warnings=None):
+    """[{"signal", "file", "evidence"}] for changed files. Secret files: path only."""
+    warnings = [] if warnings is None else warnings
+    items = []
+    changed = {f["path"] for f in files}
+    for f in files:
+        path = f["path"]
+        if is_secret(path) or is_secret(f.get("old_path") or ""):
+            items.append({"signal": "config", "file": path,
+                          "evidence": "secret file; contents not read"})
+            continue
+        for sig_, ev in path_signals(path, f["status"]):
+            items.append({"signal": sig_, "file": path, "evidence": ev})
+        if f["status"] != "deleted" and not f.get("binary") and not f.get("too_large") \
+                and not matches(path, LOCKFILES):
+            lines = diff_lines(root, since, f, warnings)
+            if lines:
+                for sig_, ev in content_signals(path, *lines):
+                    items.append({"signal": sig_, "file": path, "evidence": ev})
+        found, cut = importers(root, f, changed)
+        for ip in found:
+            item = {"signal": "importer", "file": path, "evidence": ip}
+            if cut:
+                item["truncated"] = True
+            items.append(item)
+    return items
+
+
 # -- output ------------------------------------------------------------------
 
 def fail(code, message):
@@ -295,12 +555,13 @@ def main(argv):
         changes = change_facts(root, commit)
     except Failure as e:
         return fail(e.code, str(e))
+    impact = impact_signals(root, commit, changes["files"], warnings)
     return {
         "ok": True, "config": cfg, "warnings": warnings, "save_requested": args.save,
         "since": {"commit": commit, "source": source},
         "session": {"id": log.stem if log else None,
                     "log_path": str(log) if log else None, "events": len(rows)},
-        "changes": changes,
+        "changes": changes, "impact": impact,
         "empty": not changes["files"] and not changes["commits"],
     }
 
