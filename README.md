@@ -594,7 +594,7 @@ Optional `.claude/session-recap.json` at the repo root:
 
 | Key | Default | Meaning |
 | :- | :- | :- |
-| `baseBranch` | `"main"` | Branch used for the merge-base fallback |
+| `baseBranch` | `"main"` | Branch used for the merge-base fallback. If it doesn't exist, the recap uses `origin/HEAD`'s branch, then `master` or `main`, and says so. `--base` never falls back |
 | `retentionDays` | `14` | Days to keep this repo's logs (1 to 365) |
 | `maxWords` | `250` | Target ceiling (50 to 1000); the recap never exceeds 350 words unless you ask for detail |
 | `autoRecap` | `false` | Turn on the Stop nudge |
