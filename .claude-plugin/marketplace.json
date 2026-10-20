@@ -45,6 +45,11 @@
       "name": "test-writer",
       "source": "./test-writer",
       "description": "Writes tests in your repo's own style and location, runs them, proves they can fail with a mutation check, and only then shows you the result."
+    },
+    {
+      "name": "session-recap",
+      "source": "./session-recap",
+      "description": "Writes a short recap of what a Claude Code session changed, what it affects, and what was tested, from a local activity log and your git history."
     }
   ]
 }

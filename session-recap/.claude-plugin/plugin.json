@@ -1,0 +1,13 @@
+{
+  "name": "session-recap",
+  "version": "1.0.0",
+  "description": "Writes a short recap of what a Claude Code session changed, what it affects, and what was tested, from a local activity log and your git history.",
+  "author": {
+    "name": "Piyush Anand",
+    "email": "piyushanand.1221@gmail.com"
+  },
+  "repository": "https://github.com/creatorpiyush/dev-guardrails",
+  "homepage": "https://github.com/creatorpiyush/dev-guardrails#readme",
+  "license": "MIT",
+  "keywords": ["recap", "summary", "session", "testing", "workflow"]
+}
