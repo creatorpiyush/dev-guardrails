@@ -13,9 +13,11 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import stat
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # -- config ------------------------------------------------------------------
@@ -570,6 +572,197 @@ def impact_signals(root, since, files, warnings=None):
     return items
 
 
+# -- test facts, efficiency, project facts, previous recap -------------------
+
+TEST_DIRS = {"tests", "test", "__tests__", "spec"}
+TEST_STEM = re.compile(r"^test_|_test$|\.test$|\.spec$")
+RUN_EVENTS = ("post", "fail")
+KIND_NAMES = ("test", "lint", "typecheck", "build")
+RUNNER_PREFIXES = (("npx",), ("uv", "run"), ("poetry", "run"))
+
+
+def is_test_file(path):
+    parts = path.split("/")
+    base = parts[-1]
+    return (bool(re.match(r"^test_.*\.py$|.*_test\.(py|go)$|.*\.(test|spec)\.[^.]+$", base))
+            or any(p in TEST_DIRS for p in parts[:-1]))
+
+
+def test_stem(path):
+    return TEST_STEM.sub("", posixpath.splitext(posixpath.basename(path))[0])
+
+
+def is_pass(r):
+    return r.get("event") == "post" and r.get("exit", 0) == 0
+
+
+def runs_of(rows, kinds=KIND_NAMES):
+    return [r for r in rows if r.get("event") in RUN_EVENTS and r.get("kind") in kinds
+            and isinstance(r.get("command"), str)]
+
+
+def test_facts(files, rows):
+    tests = [f["path"] for f in files if is_test_file(f["path"])]
+    stems = {test_stem(p) for p in tests}
+    untested = [f["path"] for f in files if f["status"] != "deleted" and lang_of(f["path"])
+                and not is_test_file(f["path"]) and posixpath.splitext(
+                    posixpath.basename(f["path"]))[0] not in stems]
+    commands, kinds = {}, set()
+    for r in runs_of(rows):
+        c = commands.setdefault(r["command"], {
+            "kind": r["kind"], "runs": 0, "passes": 0, "failures": 0,
+            "fail_then_pass": False, "total_ms": 0})
+        c["runs"] += 1
+        if is_pass(r):
+            c["passes"] += 1
+            c["fail_then_pass"] = c["fail_then_pass"] or c["failures"] > 0
+        else:
+            c["failures"] += 1
+        c["total_ms"] += r.get("duration_ms") if isinstance(r.get("duration_ms"), int) else 0
+        kinds.add(("integration" if r.get("integration") else "unit")
+                  if r["kind"] == "test" else r["kind"])
+    test_ts = [str(r.get("ts", "")) for r in runs_of(rows, ("test",))]
+    edit_ts = [str(r.get("ts", "")) for r in rows if r.get("event") == "post" and r.get("path")]
+    last_test, last_edit = max(test_ts, default=None), max(edit_ts, default=None)
+    return {
+        "test_files_changed": tests, "untested_files": untested, "commands": commands,
+        "kinds_ran": sorted(kinds), "last_test_ts": last_test, "last_edit_ts": last_edit,
+        "stale": bool(last_test and last_edit and last_edit > last_test),
+        "status": "recorded" if test_ts else "no test run recorded",
+    }
+
+
+def runner_args(command):
+    """(runner, args) for 'python -m pytest a' -> ('pytest', ['a']); (None, None) if unparseable."""
+    try:
+        t = shlex.split(command)
+    except ValueError:
+        return None, None
+    while t and "=" in t[0] and not t[0].startswith("-"):
+        t = t[1:]
+    for pre in RUNNER_PREFIXES:
+        if tuple(t[:len(pre)]) == pre:
+            t = t[len(pre):]
+    if t and posixpath.basename(t[0]).startswith("python") and t[1:2] == ["-m"]:
+        t = t[2:]
+    elif t:
+        t = [posixpath.basename(t[0])] + t[1:]
+    n = 2 if t[1:2] in (["test"], ["run"], ["t"]) else 1
+    return " ".join(t[:n]), t[n:]
+
+
+def is_full_suite(command, root):
+    args = runner_args(command)[1]
+    if args is None:
+        return False
+    for a in args:
+        if a in ("-k", "-t", "-run") or "::" in a or a.startswith(("-k", "-run=")):
+            return False
+        if not a.startswith("-") and os.path.exists(os.path.join(root, a)):
+            return False
+    return True
+
+
+def efficiency(rows, files, root=None):
+    root = root or os.getcwd()
+    stamps = [str(r["ts"]) for r in rows if isinstance(r.get("ts"), str)]
+    span = 0
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%SZ"
+        span = int((datetime.strptime(max(stamps), fmt) - datetime.strptime(min(stamps), fmt))
+                   .total_seconds()) if stamps else 0
+    except ValueError:
+        pass
+    timed = [r for r in rows if r.get("event") in RUN_EVENTS and isinstance(r.get("command"), str)
+             and isinstance(r.get("duration_ms"), int)]
+    longest = [{"command": r["command"], "duration_ms": r["duration_ms"]}
+               for r in sorted(timed, key=lambda r: -r["duration_ms"])[:5]]
+    edits = {}
+    for r in rows:
+        if r.get("event") == "post" and r.get("path"):
+            edits[r["path"]] = edits.get(r["path"], 0) + 1
+    fails = {}
+    for r in rows:
+        if r.get("event") == "fail" and isinstance(r.get("command"), str):
+            fails[r["command"]] = fails.get(r["command"], 0) + 1
+    done = {r.get("id") for r in rows if r.get("event") in RUN_EVENTS}
+    no_result = [{k: r[k] for k in ("tool", "command", "path", "ts") if k in r}
+                 for r in rows if r.get("event") == "pre" and r.get("id") not in done]
+    test_paths = [f["path"] for f in files if is_test_file(f["path"])]
+    full = []
+    for r in runs_of(rows, ("test",)):
+        if is_full_suite(r["command"], root):
+            runner = runner_args(r["command"])[0]
+            full.append({"command": r["command"], "ts": r.get("ts"),
+                         "suggested": " ".join([runner] + test_paths) if test_paths else None})
+    return {
+        "active_span_s": span, "longest_commands": longest,
+        "files_edited_3plus": [{"path": p, "edits": n} for p, n in edits.items() if n >= 3],
+        "repeated_failures": [{"command": c, "failures": n} for c, n in fails.items() if n >= 2],
+        "no_result": {"label": "blocked, denied, or interrupted (inferred)", "items": no_result},
+        "denied": [r for r in rows if r.get("event") == "denied"],
+        "installs": [r["command"] for r in rows if r.get("event") in RUN_EVENTS
+                     and r.get("kind") == "install" and isinstance(r.get("command"), str)],
+        "full_suite_runs": full,
+    }
+
+
+def read_text(root, name):
+    return None if is_secret(name) else read_regular(os.path.join(root, name))
+
+
+def test_command(root):
+    pkg = read_text(root, "package.json")
+    try:
+        if pkg and isinstance(json.loads(pkg).get("scripts", {}).get("test"), str):
+            return "npm test", "package.json"
+    except (ValueError, AttributeError):
+        pass
+    for name, cmd in (("Makefile", "make test"), ("justfile", "just test")):
+        text = read_text(root, name)
+        if text and re.search(r"^test\s*:", text, re.M):
+            return cmd, name
+    for name, marker in (("pytest.ini", ""), ("pyproject.toml", "[tool.pytest"),
+                         ("setup.cfg", "[tool:pytest]"), ("tox.ini", "")):
+        text = read_text(root, name)
+        if text is not None and marker in text:
+            return "pytest", name
+    for name, cmd in (("go.mod", "go test ./..."), ("Cargo.toml", "cargo test")):
+        if os.path.isfile(os.path.join(root, name)):
+            return cmd, name
+    return "unknown", None
+
+
+def project_facts(root):
+    cmd, source = test_command(root)
+    words = cmd.split()
+    needles = [] if cmd == "unknown" else [cmd.lower(), " ".join(words[:2]).lower()]
+    instr = []
+    for name in ("CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md"):
+        text = read_text(root, name)
+        if text is not None:
+            low = text.lower()
+            instr.append({"file": name, "mentions_test_command": any(n in low for n in needles)})
+    return {"test_command": cmd, "source": source, "instructions": instr}
+
+
+def previous_recap(root):
+    try:
+        newest = sorted(Path(root, ".claude", "recaps").glob("*.md"), key=lambda p: p.name)[-1]
+    except (OSError, IndexError):
+        return None
+    text = read_regular(str(newest)) or ""
+    bullets, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            inside = line[3:].strip().lower() == "next time"
+        elif inside:
+            m = re.match(r"\s*(?:[-*]|\d+\.)\s+(.*\S)", line)
+            if m and len(bullets) < 10:
+                bullets.append(m.group(1)[:300])
+    return {"file": newest.name, "next_time": bullets}
+
+
 # -- output ------------------------------------------------------------------
 
 def fail(code, message):
@@ -619,6 +812,9 @@ def main(argv):
         "session": {"id": log.stem if log else None,
                     "log_path": str(log) if log else None, "events": len(rows)},
         "changes": changes, "impact": impact,
+        "tests": test_facts(changes["files"], rows),
+        "efficiency": efficiency(rows, changes["files"], root),
+        "project": project_facts(root), "previous_recap": previous_recap(root),
         "empty": not changes["files"] and not changes["commits"],
     }
 

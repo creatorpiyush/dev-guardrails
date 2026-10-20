@@ -806,3 +806,186 @@ def test_importer_search_stops_reading_at_cap(repo, monkeypatch):
     found, cut = collect.importers(str(repo), f, {"lib.py"})
     assert len(found) == 2 and cut is True
     assert len(reads) <= 3
+
+
+# -- test facts, efficiency, project facts, previous recap -------------------
+
+def row(ts, event, tool="Bash", **kw):
+    return {"ts": "2026-10-20T" + ts + "Z", "event": event, "tool": tool, **kw}
+
+
+def py_files(*paths):
+    return [{"path": p, "status": "modified", "insertions": 1, "deletions": 0, "binary": False}
+            for p in paths]
+
+
+def test_no_test_run_recorded_without_log(repo):
+    commit(repo, {"a.py": "1\n"}, "first")
+    r = subprocess.run([sys.executable, str(COLLECT)], cwd=repo, capture_output=True, text=True)
+    assert "tests passed" not in r.stdout
+    out = json.loads(r.stdout)
+    assert out["tests"]["status"] == "no test run recorded"
+    assert out["tests"]["kinds_ran"] == []
+
+
+@pytest.mark.parametrize("event,extra", [("post", {"exit": 0}), ("fail", {"exit": 1})])
+def test_recorded_status_never_claims_pass(repo, home, hook_env, event, extra):
+    commit(repo, {"a.py": "1\n"}, "first")
+    write_log(home, repo, [row("09:00:00", event, command="pytest", kind="test", id="1", **extra)])
+    r = subprocess.run([sys.executable, str(COLLECT)], cwd=repo, env=hook_env,
+                       capture_output=True, text=True)
+    assert "tests passed" not in r.stdout
+    assert json.loads(r.stdout)["tests"]["status"] == "recorded"
+
+
+def test_stale_test_warning():
+    rows = [row("09:00:00", "post", command="pytest", kind="test", id="1", exit=0),
+            row("09:05:00", "post", "Edit", path="a.py", edits=1, id="2")]
+    t = collect.test_facts(py_files("a.py"), rows)
+    assert t["stale"] is True
+    assert t["last_test_ts"] == "2026-10-20T09:00:00Z"
+    assert t["last_edit_ts"] == "2026-10-20T09:05:00Z"
+    rows.append(row("09:10:00", "post", command="pytest", kind="test", id="3", exit=0))
+    assert collect.test_facts(py_files("a.py"), rows)["stale"] is False
+
+
+def test_fail_then_pass_pattern():
+    rows = [row("09:00:00", "fail", command="pytest", kind="test", id="1", exit=1, duration_ms=100),
+            row("09:01:00", "post", command="pytest", kind="test", id="2", exit=0, duration_ms=50),
+            row("09:02:00", "post", command="ruff .", kind="lint", id="3", exit=0),
+            row("09:02:30", "pre", command="pytest -k x", kind="test", id="4"),
+            row("09:03:00", "post", command="pytest tests/it", kind="test", integration=True,
+                id="5", exit=0)]
+    t = collect.test_facts([], rows)
+    c = t["commands"]["pytest"]
+    assert c == {"kind": "test", "runs": 2, "passes": 1, "failures": 1,
+                 "fail_then_pass": True, "total_ms": 150}
+    assert "pytest -k x" not in t["commands"]
+    assert t["kinds_ran"] == ["integration", "lint", "unit"]
+
+
+def test_repeated_edit_and_failure_detection():
+    rows = [row("09:0%d:00" % i, "post", "Edit", path="a.py", edits=1, id="e%d" % i)
+            for i in range(3)]
+    rows += [row("09:1%d:00" % i, "fail", command="make build", kind="build", id="f%d" % i, exit=2)
+             for i in range(2)]
+    rows += [row("09:20:00", "post", "Edit", path="b.py", edits=1, id="b")]
+    e = collect.efficiency(rows, [])
+    assert e["files_edited_3plus"] == [{"path": "a.py", "edits": 3}]
+    assert e["repeated_failures"] == [{"command": "make build", "failures": 2}]
+    assert e["active_span_s"] == 20 * 60
+
+
+def test_no_result_inferred_for_pre_without_post():
+    rows = [row("09:00:00", "pre", command="rm x", kind="other", id="1"),
+            row("09:00:01", "pre", command="ls", kind="other", id="2"),
+            row("09:00:02", "post", command="ls", kind="other", id="2", exit=0),
+            row("09:00:03", "denied", reason="no"),
+            row("09:00:04", "post", command="pip install x", kind="install", id="3", exit=0)]
+    e = collect.efficiency(rows, [])
+    assert e["no_result"]["label"] == "blocked, denied, or interrupted (inferred)"
+    assert [i["command"] for i in e["no_result"]["items"]] == ["rm x"]
+    assert len(e["denied"]) == 1
+    assert e["installs"] == ["pip install x"]
+
+
+def test_longest_commands_top_five():
+    rows = [row("09:00:%02d" % i, "post", command="c%d" % i, kind="other", id=str(i),
+                exit=0, duration_ms=i * 10) for i in range(7)]
+    assert [c["command"] for c in collect.efficiency(rows, [])["longest_commands"]] == \
+        ["c6", "c5", "c4", "c3", "c2"]
+
+
+def test_full_suite_with_targeted_suggestion(repo, monkeypatch):
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_a.py").write_text("")
+    monkeypatch.chdir(repo)
+    rows = [row("09:00:00", "post", command="python -m pytest", kind="test", id="1", exit=0),
+            row("09:01:00", "post", command="pytest tests/test_a.py", kind="test", id="2", exit=0),
+            row("09:02:00", "post", command="npx jest -t foo", kind="test", id="3", exit=0),
+            row("09:03:00", "post", command="pytest -k foo", kind="test", id="4", exit=0),
+            row("09:04:00", "post", command="go test ./...", kind="test", id="5", exit=0)]
+    files = py_files("tests/test_a.py", "a.py")
+    e = collect.efficiency(rows, files, str(repo))
+    assert [r["command"] for r in e["full_suite_runs"]] == ["python -m pytest", "go test ./..."]
+    assert e["full_suite_runs"][0]["suggested"] == "pytest tests/test_a.py"
+    assert collect.efficiency(rows, py_files("a.py"), str(repo))["full_suite_runs"][0]["suggested"] is None
+
+
+def test_untested_files():
+    files = py_files("src/foo.py", "src/bar.py", "tests/test_foo.py", "README.md", "cfg.json",
+                     "web/baz.ts", "web/baz.test.ts", "qux.go", "qux_test.go", "lone.go")
+    t = collect.test_facts(files, [])
+    assert sorted(t["untested_files"]) == ["lone.go", "src/bar.py"]
+    assert sorted(t["test_files_changed"]) == ["qux_test.go", "tests/test_foo.py", "web/baz.test.ts"]
+
+
+def test_is_test_file():
+    for p in ("test_a.py", "a_test.py", "a_test.go", "a.test.js", "a.spec.ts", "x/tests/a.py",
+              "x/__tests__/a.js", "spec/a.rb"):
+        assert collect.is_test_file(p), p
+    assert not collect.is_test_file("src/a.py")
+
+
+def test_project_test_command_and_claude_md_mention(repo):
+    (repo / "package.json").write_text('{"scripts": {"test": "jest"}}')
+    (repo / "CLAUDE.md").write_text("Run `npm test` before commit\n")
+    (repo / "AGENTS.md").write_text("nothing here\n")
+    p = collect.project_facts(str(repo))
+    assert p["test_command"] == "npm test" and p["source"] == "package.json"
+    assert p["instructions"] == [{"file": "CLAUDE.md", "mentions_test_command": True},
+                                 {"file": "AGENTS.md", "mentions_test_command": False}]
+
+
+@pytest.mark.parametrize("files,cmd", [
+    ({"Makefile": "build:\n\tx\ntest:\n\tpytest\n"}, "make test"),
+    ({"justfile": "test:\n  pytest\n"}, "just test"),
+    ({"pytest.ini": "[pytest]\n"}, "pytest"),
+    ({"pyproject.toml": "[tool.pytest.ini_options]\n"}, "pytest"),
+    ({"go.mod": "module x\n"}, "go test ./..."),
+    ({"Cargo.toml": "[package]\n"}, "cargo test"),
+    ({}, "unknown"),
+])
+def test_project_test_command_sources(repo, files, cmd):
+    for n, t in files.items():
+        (repo / n).write_text(t)
+    assert collect.project_facts(str(repo))["test_command"] == cmd
+
+
+def test_project_go_mention_accepts_prefix(repo):
+    (repo / "go.mod").write_text("module x\n")
+    (repo / "CLAUDE.md").write_text("use go test with -race\n")
+    assert collect.project_facts(str(repo))["instructions"][0]["mentions_test_command"] is True
+
+
+def test_previous_recap_carry_over(repo):
+    assert collect.previous_recap(str(repo)) is None
+    d = repo / ".claude" / "recaps"
+    d.mkdir(parents=True)
+    (d / "2026-10-01-old.md").write_text("## Next time\n- old\n")
+    (d / "2026-10-19-new.md").write_text(
+        "# R\n## Next time\n- run tests\n* check CI\n1. third\n\n## Other\n- not me\n")
+    p = collect.previous_recap(str(repo))
+    assert p == {"file": "2026-10-19-new.md", "next_time": ["run tests", "check CI", "third"]}
+
+
+def test_previous_recap_caps(repo):
+    d = repo / ".claude" / "recaps"
+    d.mkdir(parents=True)
+    (d / "a.md").write_text("## Next time\n" + "".join("- %s\n" % ("x" * 400)
+                                                       for _ in range(15)))
+    nt = collect.previous_recap(str(repo))["next_time"]
+    assert len(nt) == 10 and all(len(b) == 300 for b in nt)
+
+
+def test_valid_json_everywhere(tmp_path, repo, home, hook_env):
+    runs = [(tmp_path, ()), (repo, ("--bogus",)), (repo, ()), (repo, ("--since", "nonsense")),
+            (repo, ("--base", "nope")), (repo, ("--save",))]
+    commit(repo, {"a.py": "1\n"}, "first")
+    for cwd, args in runs:
+        r = subprocess.run([sys.executable, str(COLLECT), *args], cwd=cwd, env=hook_env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0
+        assert isinstance(json.loads(r.stdout)["ok"], bool)
+    out = run_collect(repo, env=hook_env)
+    assert {"tests", "efficiency", "project", "previous_recap"} <= set(out)
