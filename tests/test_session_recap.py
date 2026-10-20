@@ -508,6 +508,19 @@ def test_redaction_leaves_safe_commands_unchanged(cmd):
     assert log_activity.redact(cmd) == cmd
 
 
+@pytest.mark.parametrize("cmd", ["_key" * 25000, "auth_token_id" * 9000, "a=" * 50000],
+                         ids=["key-run", "token-run", "assignments"])
+def test_redaction_stays_fast_on_huge_commands(cmd):
+    start = time.monotonic()
+    log_activity.redact(cmd)
+    assert time.monotonic() - start < 1.0
+
+
+def test_redaction_still_covers_a_secret_past_the_log_cap():
+    cmd = "x" * (log_activity.COMMAND_CAP - 10) + " DB_PASSWORD=hunter2hunter2 && make"
+    assert "hunter2" not in log_activity.redact(cmd)[:log_activity.COMMAND_CAP]
+
+
 # -- change facts ------------------------------------------------------------
 
 def g(repo, *args, date=None):

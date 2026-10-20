@@ -27,6 +27,7 @@ COLLECT_DIR = os.path.join(HERE, "..", "scripts")
 
 DEFAULT_RETENTION_DAYS = 14  # other repos' logs always use this; also the import fallback
 COMMAND_CAP = 500
+REDACT_CAP = 8192  # redact() looks at no more than this; must stay well above COMMAND_CAP
 RETENTION_MARKER = "retention"
 DEFAULT_TEST_KINDS = ["pytest", "jest", "go test"]
 SHELL_TOOLS = {"Bash", "PowerShell"}
@@ -200,6 +201,9 @@ def redact(command):
     """Replace secrets in a raw command string; ${VAR} and <placeholder> stay.
 
     Pattern-based: it can miss a secret in a shape no rule knows."""
+    # ponytail: ASSIGNMENT backtracks quadratically on long name runs; the cap keeps every rule
+    # well under the hook timeout. Callers keep only COMMAND_CAP chars, far below REDACT_CAP.
+    command = command[:REDACT_CAP]
     command = KEY_BLOCK.sub("<redacted:private-key>", command)
     for name, rx in SECRET_RULES:
         command = rx.sub("<redacted:%s>" % name, command)
