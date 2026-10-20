@@ -325,15 +325,15 @@ def _inside(path, root):
 # -- record ------------------------------------------------------------------
 
 def record(payload, root, cfg):
-    """One log row for a PostToolUse / PostToolUseFailure payload, else None.
+    """One log row for a tool event payload, else None.
 
     Reads only tool_name, tool_use_id, duration_ms, tool_input.file_path /
     notebook_path / edits / command, tool_response.interrupted, error (first
-    line), is_interrupt, reason. Nothing else.
+    line), is_interrupt, reason (PermissionDenied, redacted). Nothing else.
     """
     name = payload.get("hook_event_name")
-    # Task 4 adds branches here for PreToolUse, PermissionDenied and Stop.
-    event = {"PostToolUse": "post", "PostToolUseFailure": "fail"}.get(name)
+    event = {"PreToolUse": "pre", "PostToolUse": "post", "PostToolUseFailure": "fail",
+             "PermissionDenied": "denied"}.get(name)
     if event is None:
         return None
     tool = payload.get("tool_name")
@@ -356,6 +356,10 @@ def record(payload, root, cfg):
         if integration:
             row["integration"] = True
 
+    if event == "denied" and isinstance(payload.get("reason"), str):
+        row["reason"] = redact(payload["reason"])[:COMMAND_CAP]
+    if event in ("pre", "denied"):
+        return row
     error = payload.get("error")
     if event == "post":
         row["exit"] = 0
@@ -370,6 +374,38 @@ def record(payload, root, cfg):
             isinstance(resp, dict) and resp.get("interrupted") is True):
         row["interrupted"] = True
     return row
+
+
+# -- Stop nudge --------------------------------------------------------------
+
+NUDGE_MIN_FILES = 3
+
+
+def stop_message(rows, cfg, stop_hook_active):
+    """One-time suggestion to run the recap, or None."""
+    if not cfg.get("autoRecap") or stop_hook_active:
+        return None
+    if any(r.get("event") == "recap_suggested" for r in rows):
+        return None
+    n = len({r["path"] for r in rows if r.get("event") == "post" and r.get("path")})
+    if n < NUDGE_MIN_FILES:
+        return None
+    return "This session changed %d files. Run /session-recap:summary for a recap." % n
+
+
+def read_rows(f):
+    rows = []
+    try:
+        for line in f.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict):
+                rows.append(r)
+    except OSError:
+        pass
+    return rows
 
 
 # -- retention ---------------------------------------------------------------
@@ -403,9 +439,10 @@ def load_cfg(root):
         import collect_recap  # the plugin's own collector; lazy so a failure fails open
         cfg = collect_recap.load_config(root)[0]
         return {"retentionDays": cfg["retentionDays"],
+                "autoRecap": cfg["autoRecap"] is True,
                 "testCommandKinds": list(cfg["testCommandKinds"])}
     except Exception:
-        return {"retentionDays": DEFAULT_RETENTION_DAYS,
+        return {"retentionDays": DEFAULT_RETENTION_DAYS, "autoRecap": False,
                 "testCommandKinds": list(DEFAULT_TEST_KINDS)}
 
 
@@ -420,15 +457,22 @@ def main():
         return
     cfg = load_cfg(root)
     days = cfg["retentionDays"]
-    row = record(payload, root, cfg)
     home = Path.home()
+    d = log_dir(home, root)
+    logfile = d / (safe_session(payload.get("session_id")) + ".jsonl")
+    row = record(payload, root, cfg)
+    msg = None
+    if payload.get("hook_event_name") == "Stop":
+        msg = stop_message(read_rows(logfile), cfg, payload.get("stop_hook_active") is True)
+        if msg:
+            row = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                   "event": "recap_suggested"}
     if row:
-        d = log_dir(home, root)
         d.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(row, separators=(",", ":")) + "\n"
-        with open(d / (safe_session(payload.get("session_id")) + ".jsonl"), "a",
-                  encoding="utf-8") as f:
-            f.write(line)
+        with open(logfile, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, separators=(",", ":")) + "\n")
+    if msg:
+        print(json.dumps({"systemMessage": msg}))
     prune(home / ".claude" / "session-recap", DEFAULT_RETENTION_DAYS, time.time(),
           log_dir(home, root), days)
 

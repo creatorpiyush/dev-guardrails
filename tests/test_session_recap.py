@@ -218,10 +218,63 @@ def test_log_write_error_fails_open(repo, home, hook_env):
     assert rc == 0 and out == ""
 
 
-def test_pre_stop_denied_write_nothing_yet(repo, home, hook_env):
-    for ev in ("PreToolUse", "PermissionDenied", "Stop"):
-        rc, out, rows = run_hook(post(repo, "Bash", {"command": "ls"}, hook_event_name=ev), hook_env)
-        assert rc == 0 and out == "" and rows == []
+def test_pre_event_logged(repo, hook_env):
+    p = post(repo, "Bash", {"command": "pytest -q"}, hook_event_name="PreToolUse")
+    rc, out, rows = run_hook(p, hook_env)
+    assert rc == 0 and out == ""
+    assert rows[0]["event"] == "pre" and rows[0]["id"] == "t1"
+    assert rows[0]["kind"] == "test" and "exit" not in rows[0]
+    p = post(repo, "Edit", {"file_path": str(repo / "a.py")}, hook_event_name="PreToolUse")
+    assert run_hook(p, hook_env)[2][-1]["path"] == "a.py"
+
+
+def test_permission_denied_logged_redacted(repo, home, hook_env):
+    secret = "ghp_" + "A1b2" * 9
+    p = post(repo, "Bash", {"command": "curl -H 'Authorization: Bearer %s' x" % secret},
+             hook_event_name="PermissionDenied", reason="blocked token " + secret)
+    rc, out, rows = run_hook(p, hook_env)
+    assert rc == 0 and out == "" and rows[0]["event"] == "denied"
+    assert rows[0]["reason"].startswith("blocked token ") and secret not in all_text(home)
+
+
+def edits(repo, hook_env, n):
+    for i in range(n):
+        p = post(repo, "Edit", {"file_path": str(repo / ("f%d.py" % i))}, tool_use_id="e%d" % i)
+        run_hook(p, hook_env)
+
+
+def stop(repo, hook_env, **extra):
+    return run_hook({"session_id": "s1", "cwd": str(repo), "hook_event_name": "Stop",
+                     "stop_hook_active": False, **extra}, hook_env)
+
+
+def test_stop_silent_by_default(repo, hook_env):
+    edits(repo, hook_env, 3)
+    rc, out, rows = stop(repo, hook_env)
+    assert rc == 0 and out == "" and not any(r["event"] == "recap_suggested" for r in rows)
+
+
+def test_stop_suggests_once_when_enabled(repo, hook_env):
+    write_config(repo, '{"autoRecap": true}')
+    edits(repo, hook_env, 3)
+    rc, out, rows = stop(repo, hook_env)
+    msg = json.loads(out)["systemMessage"]
+    assert rc == 0 and "/session-recap:summary" in msg and "3 files" in msg
+    assert "decision" not in json.loads(out)
+    assert [r["event"] for r in rows].count("recap_suggested") == 1
+    assert stop(repo, hook_env)[1] == ""
+
+
+def test_stop_needs_three_files(repo, hook_env):
+    write_config(repo, '{"autoRecap": true}')
+    edits(repo, hook_env, 2)
+    assert stop(repo, hook_env)[1] == ""
+
+
+def test_stop_hook_active_is_silent(repo, hook_env):
+    write_config(repo, '{"autoRecap": true}')
+    edits(repo, hook_env, 3)
+    assert stop(repo, hook_env, stop_hook_active=True)[1] == ""
 
 
 def test_retention_prunes_old_logs(repo, home, hook_env):
