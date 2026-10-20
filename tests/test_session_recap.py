@@ -908,7 +908,7 @@ def test_full_suite_with_targeted_suggestion(repo, monkeypatch):
     files = py_files("tests/test_a.py", "a.py")
     e = collect.efficiency(rows, files, str(repo))
     assert [r["command"] for r in e["full_suite_runs"]] == ["python -m pytest", "go test ./..."]
-    assert e["full_suite_runs"][0]["suggested"] == "pytest tests/test_a.py"
+    assert e["full_suite_runs"][0]["suggested"] == "python -m pytest tests/test_a.py"
     assert collect.efficiency(rows, py_files("a.py"), str(repo))["full_suite_runs"][0]["suggested"] is None
 
 
@@ -989,3 +989,19 @@ def test_valid_json_everywhere(tmp_path, repo, home, hook_env):
         assert isinstance(json.loads(r.stdout)["ok"], bool)
     out = run_collect(repo, env=hook_env)
     assert {"tests", "efficiency", "project", "previous_recap"} <= set(out)
+
+
+def test_suggested_only_for_known_runners(repo):
+    def runs(cmds, files):
+        rows = [row("09:0%d:00" % i, "post", command=c, kind="test", id=str(i), exit=0)
+                for i, c in enumerate(cmds)]
+        return {r["command"]: r["suggested"]
+                for r in collect.efficiency(rows, files, str(repo))["full_suite_runs"]}
+    files = py_files("tests/test_a.py", "web/a.test.ts", "pkg/x/a_test.go", "b_test.go")
+    got = runs(["npm run test", "make test", "yarn test", "python -m pytest", "npx jest",
+                "go test ./...", ""], files)
+    assert "" not in got and "   " not in runs(["   "], files)
+    assert got["npm run test"] is None and got["make test"] is None and got["yarn test"] is None
+    assert got["python -m pytest"] == "python -m pytest tests/test_a.py"
+    assert got["npx jest"] == "npx jest web/a.test.ts"
+    assert got["go test ./..."] == "go test ./... ./pkg/x/..."

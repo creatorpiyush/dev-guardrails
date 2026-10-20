@@ -633,11 +633,14 @@ def test_facts(files, rows):
 
 
 def runner_args(command):
-    """(runner, args) for 'python -m pytest a' -> ('pytest', ['a']); (None, None) if unparseable."""
+    """(runner, args, head) for 'python -m pytest a' -> ('pytest', ['a'], 'python -m pytest');
+    (None, None, None) if unparseable or empty. head keeps the runner text as typed."""
     try:
-        t = shlex.split(command)
+        t = orig = shlex.split(command)
     except ValueError:
-        return None, None
+        return None, None, None
+    if not t:
+        return None, None, None
     while t and "=" in t[0] and not t[0].startswith("-"):
         t = t[1:]
     for pre in RUNNER_PREFIXES:
@@ -648,11 +651,11 @@ def runner_args(command):
     elif t:
         t = [posixpath.basename(t[0])] + t[1:]
     n = 2 if t[1:2] in (["test"], ["run"], ["t"]) else 1
-    return " ".join(t[:n]), t[n:]
+    return " ".join(t[:n]), t[n:], " ".join(orig[:len(orig) - len(t) + n])
 
 
 def is_full_suite(command, root):
-    args = runner_args(command)[1]
+    args = runner_args(command)[1]  # None: unparseable or empty
     if args is None:
         return False
     for a in args:
@@ -661,6 +664,23 @@ def is_full_suite(command, root):
         if not a.startswith("-") and os.path.exists(os.path.join(root, a)):
             return False
     return True
+
+
+def suggest_targeted(command, test_paths):
+    """Runner plus changed test files, only for runners that take file arguments."""
+    runner, _, head = runner_args(command)
+    if runner in ("pytest", "py.test"):
+        exts = (".py",)
+    elif runner in ("jest", "vitest", "mocha"):
+        exts = LANG_EXTS["js"]
+    elif runner == "go test":
+        dirs = sorted({"./" + d + "/..." if d else "./..."
+                       for d in (posixpath.dirname(p) for p in test_paths if p.endswith("_test.go"))})
+        return " ".join([head] + dirs) if dirs else None
+    else:
+        return None
+    paths = [p for p in test_paths if p.endswith(exts)]
+    return " ".join([head] + paths) if paths else None
 
 
 def efficiency(rows, files, root=None):
@@ -692,9 +712,8 @@ def efficiency(rows, files, root=None):
     full = []
     for r in runs_of(rows, ("test",)):
         if is_full_suite(r["command"], root):
-            runner = runner_args(r["command"])[0]
             full.append({"command": r["command"], "ts": r.get("ts"),
-                         "suggested": " ".join([runner] + test_paths) if test_paths else None})
+                         "suggested": suggest_targeted(r["command"], test_paths)})
     return {
         "active_span_s": span, "longest_commands": longest,
         "files_edited_3plus": [{"path": p, "edits": n} for p, n in edits.items() if n >= 3],
