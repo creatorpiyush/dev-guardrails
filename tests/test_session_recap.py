@@ -20,8 +20,8 @@ collect = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(collect)
 
 
-def run_collect(cwd, *args):
-    r = subprocess.run([sys.executable, str(COLLECT), *args], cwd=cwd,
+def run_collect(cwd, *args, env=None):
+    r = subprocess.run([sys.executable, str(COLLECT), *args], cwd=cwd, env=env,
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
@@ -399,3 +399,166 @@ def test_redacts_user_flag_and_key_headers():
     assert "alice:" in log_activity.redact("curl -u alice:s3cr3t x")
     for cmd in ["curl -u $USER:$PASS x", "curl -u alice https://x", "curl -u alice:$PW x"]:
         assert log_activity.redact(cmd) == cmd
+
+
+# -- change facts ------------------------------------------------------------
+
+def g(repo, *args, date=None):
+    e = dict(os.environ)
+    if date:
+        e["GIT_COMMITTER_DATE"] = e["GIT_AUTHOR_DATE"] = date
+    r = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                        *args], cwd=repo, env=e, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def commit(repo, files, msg, date="2026-10-20T09:00:00Z"):
+    for name, text in files.items():
+        f = repo / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+    g(repo, "add", "-A")
+    g(repo, "commit", "-q", "-m", msg, date=date)
+    return g(repo, "rev-parse", "HEAD")
+
+
+def by_path(out):
+    return {f["path"]: f for f in out["changes"]["files"]}
+
+
+def write_log(home, repo, rows, sid="s1"):
+    d = collect.log_dir(home, str(repo))
+    d.mkdir(parents=True, exist_ok=True)
+    (d / (sid + ".jsonl")).write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return d / (sid + ".jsonl")
+
+
+def test_change_facts_add_modify_delete_rename(repo):
+    body = "".join("line %d of a long enough file\n" % i for i in range(20))
+    base = commit(repo, {"a.py": "x\n", "b.py": "y\n", "old.txt": body, "keep.py": "k\n"}, "base")
+    (repo / "a.py").write_text("x\nz\n")
+    (repo / "b.py").unlink()
+    (repo / "new.py").write_text("n\n")
+    g(repo, "mv", "old.txt", "moved.txt")
+    (repo / "moved.txt").write_text(body + "extra\n")
+    g(repo, "add", "-A")
+    out = run_collect(repo, "--since", base)
+    f = by_path(out)
+    assert f["a.py"]["status"] == "modified" and f["a.py"]["insertions"] == 1
+    assert f["b.py"]["status"] == "deleted" and f["b.py"]["deletions"] == 1
+    assert f["new.py"]["status"] == "added"
+    assert f["moved.txt"]["status"] == "renamed" and f["moved.txt"]["old_path"] == "old.txt"
+    assert out["changes"]["totals"]["files"] == 4
+    assert out["changes"]["by_type"]["py"] == 3
+    assert out["changes"]["by_area"]["."] == 4
+    assert out["empty"] is False
+
+
+def test_uncommitted_and_untracked_counted(repo):
+    base = commit(repo, {"a.py": "x\n"}, "base")
+    (repo / "a.py").write_text("x\ny\n")
+    (repo / "src").mkdir()
+    (repo / "src" / "u.py").write_text("1\n2\n3\n")
+    out = run_collect(repo, "--since", base)
+    f = by_path(out)
+    assert f["a.py"]["status"] == "modified"
+    assert f["src/u.py"]["status"] == "added" and f["src/u.py"]["insertions"] == 3
+    assert len(out["changes"]["files"]) == 2
+    assert out["changes"]["by_area"]["src"] == 1
+
+
+def test_unborn_repo_change_facts(repo):
+    (repo / "u.py").write_text("1\n2\n")
+    out = run_collect(repo)
+    assert out["ok"] is True
+    assert out["since"] == {"commit": collect.EMPTY_TREE, "source": "empty-tree"}
+    assert out["changes"]["commits"] == []
+    assert by_path(out)["u.py"]["status"] == "added"
+    assert out["empty"] is False
+
+
+def test_since_ref_and_time(repo):
+    a = commit(repo, {"a.py": "1\n"}, "first", "2026-10-20T08:00:00Z")
+    commit(repo, {"b.py": "2\n"}, "second", "2026-10-20T10:00:00Z")
+    out = run_collect(repo, "--since", a)
+    assert out["since"] == {"commit": a, "source": "ref"}
+    assert [c["subject"] for c in out["changes"]["commits"]] == ["second"]
+    assert len(out["changes"]["commits"][0]["sha"]) == 12
+    for since in ("2026-10-20T09:00:00Z", "2026-10-20T09:00:00+00:00"):
+        out = run_collect(repo, "--since", since)
+        assert out["since"] == {"commit": a, "source": "time"}, since
+    out = run_collect(repo, "--since", "2026-10-19")
+    assert out["since"] == {"commit": collect.EMPTY_TREE, "source": "time"}
+    out = run_collect(repo, "--since", "2.hours.ago")
+    assert out["since"]["source"] == "time"
+
+
+@pytest.mark.parametrize("since", ["nonsense", "yesterday-ish", "not a time"])
+def test_since_unknown_is_error(repo, since):
+    commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, "--since", since)
+    assert out["ok"] is False and out["error"]["code"] == "since-not-found"
+
+
+def test_default_since_is_session_start(repo, home, hook_env):
+    a = commit(repo, {"a.py": "1\n"}, "first", "2026-10-20T08:00:00Z")
+    commit(repo, {"b.py": "2\n"}, "second", "2026-10-20T10:00:00Z")
+    path = write_log(home, repo, [
+        {"ts": "2026-10-20T09:30:00Z", "event": "post", "tool": "Edit", "path": "b.py"},
+        {"ts": "2026-10-20T09:00:00Z", "event": "pre", "tool": "Edit"},
+    ])
+    out = run_collect(repo, env=hook_env)
+    assert out["since"] == {"commit": a, "source": "session-start"}
+    assert out["session"]["id"] == "s1"
+    assert out["session"]["events"] == 2
+    assert out["session"]["log_path"] == str(path)
+
+
+def test_session_flag_selects_log(repo, home, hook_env):
+    commit(repo, {"a.py": "1\n"}, "first")
+    write_log(home, repo, [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}], sid="old")
+    write_log(home, repo, [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}] * 3, sid="new")
+    out = run_collect(repo, "--session", "old", env=hook_env)
+    assert out["session"]["id"] == "old" and out["session"]["events"] == 1
+
+
+def test_default_since_merge_base_without_log(repo, hook_env):
+    a = commit(repo, {"a.py": "1\n"}, "first")
+    g(repo, "branch", "-M", "main")
+    g(repo, "checkout", "-q", "-b", "feat/x")
+    commit(repo, {"b.py": "2\n"}, "second")
+    out = run_collect(repo, env=hook_env)
+    assert out["since"] == {"commit": a, "source": "merge-base"}
+    assert out["session"] == {"id": None, "log_path": None, "events": 0}
+
+
+def test_base_not_found(repo, hook_env):
+    commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, "--base", "nope", env=hook_env)
+    assert out["ok"] is False and out["error"]["code"] == "base-not-found"
+
+
+def test_error_precedence(tmp_path, repo):
+    assert run_collect(tmp_path, "--bogus")["error"]["code"] == "not-a-repo"
+    commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, "--bogus")
+    assert out["error"]["code"] == "bad-arguments"
+    out = run_collect(repo, "--since", "nonsense", "--base", "nope")
+    assert out["error"]["code"] == "since-not-found"
+
+
+def test_no_changes_is_empty(repo):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, "--since", base)
+    assert out["changes"]["files"] == [] and out["changes"]["commits"] == []
+    assert out["empty"] is True
+
+
+def test_malformed_log_lines_skipped(tmp_path):
+    f = tmp_path / "x.jsonl"
+    f.write_text('garbage\n[1, 2]\n{"ts": "2026-10-20T09:00:00Z", "ev\n'
+                 '{"ts": "2026-10-20T09:00:00Z", "event": "pre"}\n')
+    rows = collect.read_log(f)
+    assert rows == [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}]
+    assert collect.read_log(None) == []

@@ -123,3 +123,11 @@ def test_shell_parsing_copied_to_session_recap(name):
 @pytest.mark.parametrize("name", ["SECRET_RULES", "EXTRA_REDACTIONS", "KEY_BLOCK"])
 def test_redaction_rules_copied_to_session_recap(name):
     assert definition(PR_WRITER, name) == definition(LOG_ACTIVITY, name)
+
+
+COLLECT_RECAP = ROOT / "session-recap" / "scripts" / "collect_recap.py"
+
+
+@pytest.mark.parametrize("name", ["log_dir", "safe_session"])
+def test_log_paths_copied_to_collect_recap(name):
+    assert definition(LOG_ACTIVITY, name) == definition(COLLECT_RECAP, name)
