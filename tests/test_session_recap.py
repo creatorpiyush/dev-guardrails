@@ -251,3 +251,75 @@ def test_repo_retention_only_shortens_its_own_logs(repo, home, hook_env):
     write_config(repo, '{"retentionDays": 1}')
     run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
     assert not mine.exists() and theirs.exists()
+
+
+# -- classify / redact ---------------------------------------------------------
+
+import random
+import string
+
+_rng = random.Random(4321)
+
+
+def _rand(n):
+    alphabet = "".join(c for c in string.ascii_letters + string.digits if c not in "xX")
+    return "".join(_rng.choice(alphabet) for _ in range(n))
+
+
+DEFAULT_TESTS = ["pytest", "jest", "go test"]
+
+
+@pytest.mark.parametrize("command,kind,integration", [
+    ("pytest -q", "test", False),
+    ("python -m pytest tests/x.py", "test", False),
+    ("cd a && npm test", "test", False),
+    ("sudo env X=1 pytest", "test", False),
+    ("bash -c 'cargo test'", "test", False),
+    ("pytest tests/integration", "test", True),
+    ("npx jest e2e/", "test", True),
+    ("ruff check .", "lint", False),
+    ("mypy src", "typecheck", False),
+    ("npm run build", "build", False),
+    ("pip install -r r.txt", "install", False),
+    ("git status", "git", False),
+    ("ls", "other", False),
+    ("pip install x && pytest", "test", False),
+    ("go test ./...", "test", False),
+    ("uv run pytest", "test", False),
+    ("echo 'unbalanced", "other", False),
+])
+def test_classify_kinds(command, kind, integration):
+    assert log_activity.classify(command, DEFAULT_TESTS) == (kind, integration)
+
+
+def test_classify_uses_config_test_commands():
+    assert log_activity.classify("bats t/", ["bats"])[0] == "test"
+    assert log_activity.classify("bats t/", DEFAULT_TESTS)[0] == "other"
+
+
+def test_redacts_tokens_and_url_credentials():
+    token = "gh" + "p_" + _rand(36)
+    out = log_activity.redact("curl -H x:%s https://user:hunter2@host/x" % token)
+    assert token not in out and "hunter2" not in out and "host/x" in out
+
+
+def test_redacts_header_and_multiline():
+    token = "gh" + "p_" + _rand(36)
+    out = log_activity.redact('curl -H "Authorization: Bearer abc.def" x')
+    assert "abc.def" not in out
+    assert "s3cr3t" not in log_activity.redact("login --password=s3cr3t")
+    assert "s3cr3t" not in log_activity.redact("login --password s3cr3t")
+    assert "--password=$PW" in log_activity.redact("login --password=$PW")
+    out = log_activity.redact("cat <<EOF\nline\n%s\nEOF" % token)
+    assert token not in out and "line" in out
+
+
+def test_logged_command_is_redacted(repo, home, hook_env):
+    token = "gh" + "p_" + _rand(36)
+    # the token straddles the 500-char cap: redaction must come before the cut
+    cmd = "echo " + "a" * (log_activity.COMMAND_CAP - 12) + " " + token
+    _, _, rows = run_hook(post(repo, "Bash", {"command": cmd}), hook_env)
+    assert token not in all_text(home) and token[:10] not in all_text(home)
+    assert rows[0]["kind"] == "other"
+    _, _, rows = run_hook(post(repo, "Bash", {"command": "pytest tests/e2e"}), hook_env)
+    assert rows[-1]["kind"] == "test" and rows[-1]["integration"] is True

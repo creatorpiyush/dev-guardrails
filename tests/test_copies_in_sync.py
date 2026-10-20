@@ -107,3 +107,19 @@ def test_glob_re_copied_to_pr_writer(pattern, path):
     copy = load(PR_WRITER).glob_re(pattern)
     assert bool(original.fullmatch(path)) == bool(copy.fullmatch(path))
     assert copy.flags & re.IGNORECASE
+
+
+LOG_ACTIVITY = ROOT / "session-recap" / "hooks" / "log_activity.py"
+
+
+@pytest.mark.parametrize("name", [
+    "SEPARATOR_CHARS", "KEYWORDS", "WRAPPERS", "SHELLS", "SHELL_OPTS_WITH_VALUE", "MAX_DEPTH",
+    "split_segments", "takes_separate_value", "unwrap", "nested_script",
+])
+def test_shell_parsing_copied_to_session_recap(name):
+    assert definition(GIT_GUARD, name) == definition(LOG_ACTIVITY, name)
+
+
+@pytest.mark.parametrize("name", ["SECRET_RULES", "EXTRA_REDACTIONS", "KEY_BLOCK"])
+def test_redaction_rules_copied_to_session_recap(name):
+    assert definition(PR_WRITER, name) == definition(LOG_ACTIVITY, name)

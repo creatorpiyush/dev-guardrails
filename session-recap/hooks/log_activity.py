@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -26,8 +27,253 @@ COLLECT_DIR = os.path.join(HERE, "..", "scripts")
 
 DEFAULT_RETENTION_DAYS = 14  # other repos' logs always use this; also the import fallback
 COMMAND_CAP = 500
+DEFAULT_TEST_KINDS = ["pytest", "jest", "go test"]
 SHELL_TOOLS = {"Bash", "PowerShell"}
 EXIT_CODE = re.compile(r"Exit code (\d+)")
+
+# -- shell parsing -----------------------------------------------------------
+# Copied from git-workflow-guard/hooks/git_guard.py (git_invocations is left out).
+# Plugins install separately and can't import each other;
+# tests/test_copies_in_sync.py keeps them identical.
+
+# Tokens made only of these split commands: operators, newlines, ( ) of
+# subshells and $(...), and backticks.
+SEPARATOR_CHARS = set(";&|\n()`")
+KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"}
+# wrapper -> its options that take a separate value
+WRAPPERS = {
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "--user", "--group"},
+    "doas": {"-u", "-C"},
+    "env": {"-u", "-C", "-S"},
+    "command": set(), "builtin": set(), "nohup": set(), "exec": {"-a"},
+    "time": {"-f", "-o"},
+    "nice": {"-n"},
+    "timeout": {"-s", "-k", "--signal", "--kill-after"},
+    "xargs": {"-n", "-I", "-P", "-L", "-d", "-E", "-s", "-a"},
+}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+SHELL_OPTS_WITH_VALUE = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+MAX_DEPTH = 3  # nested bash -c / eval
+
+
+def split_segments(command):
+    """Split a shell command into simple-command token lists. None if unparseable.
+
+    Subshells, $(...), and backticks split commands too, so `(git push)` and
+    `echo $(git push)` are seen. Each ( and ) is also kept as its own
+    one-token segment, so callers can undo a `cd` made inside a subshell.
+    Quoted text stays one token."""
+    lex = shlex.shlex(command, posix=True, punctuation_chars=";&|()`")
+    lex.whitespace = " \t\r"  # keep newlines as command separators
+    lex.whitespace_split = True
+    lex.commenters = ""
+    try:
+        tokens = list(lex)
+    except ValueError:
+        return None
+    segments, cur = [], []
+    for tok in tokens:
+        if tok and set(tok) <= SEPARATOR_CHARS:
+            if cur:
+                segments.append(cur)
+            cur = []
+            segments += [[c] for c in tok if c in "()"]
+        else:
+            cur.append(tok)
+    if cur:
+        segments.append(cur)
+    return segments
+
+
+def takes_separate_value(opt, opts):
+    """True when wrapper option `opt` (or the last option in a cluster like
+    -iu) takes the next argument as its value. -uroot carries its own."""
+    if opt in opts:
+        return True
+    if opt.startswith("--") or len(opt) < 3:
+        return False
+    for k, c in enumerate(opt[1:], 1):
+        if "-" + c in opts:
+            return k == len(opt) - 1
+    return False
+
+
+def unwrap(seg):
+    """Strip leading VAR=value, shell keywords, and wrappers such as sudo or env."""
+    seg = list(seg)
+    while seg:
+        if seg[0] in KEYWORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[0]):
+            seg.pop(0)
+            continue
+        name = os.path.basename(seg[0])
+        if name not in WRAPPERS:
+            break
+        seg.pop(0)
+        while seg and seg[0].startswith("-") and seg[0] != "--":
+            if takes_separate_value(seg.pop(0), WRAPPERS[name]) and seg:
+                seg.pop(0)
+        if seg and seg[0] == "--":
+            seg.pop(0)
+        if name == "timeout" and seg:
+            seg.pop(0)  # the duration
+    return seg
+
+
+def nested_script(seg):
+    """The script `bash -c '...'` or `eval ...` runs, else None."""
+    name = os.path.basename(seg[0]).lower()
+    if name == "eval":
+        return " ".join(seg[1:])
+    if name in SHELLS:
+        k = 1  # only options before the script name: `bash run.sh -c x` passes -c to run.sh
+        while k < len(seg) - 1 and seg[k].startswith(("-", "+")):
+            if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", seg[k]):
+                return seg[k + 1]
+            k += 2 if seg[k] in SHELL_OPTS_WITH_VALUE else 1
+    return None
+
+
+# -- redaction ---------------------------------------------------------------
+# Copied from pr-writer/scripts/collect_context.py, which copied the high-confidence
+# rules from secret-scan-guard/hooks/patterns.py. Keep in sync (see CLAUDE.md).
+
+# (the high-confidence rules, which block there)
+SECRET_RULES = [
+    ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
+    ("github-fine-grained-token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{50,}\b")),
+    ("gitlab-token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b")),
+    ("slack-token", re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}")),
+    ("slack-webhook", re.compile(
+        r"https://hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]+")),
+    ("anthropic-api-key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{32,}")),
+    ("openai-api-key", re.compile(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}")),
+    ("stripe-live-key", re.compile(r"\b[rs]k_live_[A-Za-z0-9]{20,}")),
+    ("sendgrid-api-key", re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b")),
+    ("npm-token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
+    ("twilio-api-key", re.compile(r"\bSK[0-9a-f]{32}\b")),
+    ("private-key", re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----")),
+]
+
+# Medium-confidence secrets that secret-scan-guard only asks about, but that never
+# belong in a PR body. Only the secret part is replaced; ${VAR} and <placeholder> stay.
+EXTRA_REDACTIONS = [
+    ("url-credentials", re.compile(r"(\b[a-z][a-z0-9+.-]*://[^/\s:@'\"]+:)(?![$<])[^/\s'\"]+@"),
+     r"\1<redacted:url-credentials>@"),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+     "<redacted:jwt>"),
+]
+
+INJECTION = re.compile(
+    r"(?i)\b(ignore|disregard|forget)\b.{0,30}\b(previous|prior|above|earlier)\b.{0,20}"
+    r"\b(instructions?|prompts?|rules)\b|\byou are now\b|<\s*/?\s*system\s*>")
+EXCERPT_FILES, EXCERPT_LINES = 5, 80
+
+
+# A private key's header rule only matches one line; cover the whole block. Without an END
+# line, take the run of base64-looking lines (optionally with a diff +/-/space prefix).
+KEY_BLOCK = re.compile(
+    SECRET_RULES[-1][1].pattern
+    + r"(?:.*?-----END (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----|(?:\r?\n[+\- ]?[A-Za-z0-9+/=]+)*)",
+    re.S)
+
+
+AUTH_HEADER = re.compile(r"(?i)(authorization:\s*(?:bearer|basic|token)?\s*)\S+")
+PASSWORD_FLAG = re.compile(
+    r"(?i)(--?(?:password|passwd|pass|token|secret|api[-_]?key)(?:=|\s+))(?![$<])\S+")
+
+
+def redact(command):
+    """Replace secrets in a raw command string; ${VAR} and <placeholder> stay."""
+    command = KEY_BLOCK.sub("<redacted:private-key>", command)
+    for name, rx in SECRET_RULES:
+        command = rx.sub("<redacted:%s>" % name, command)
+    for _name, rx, repl in EXTRA_REDACTIONS:
+        command = rx.sub(repl, command)
+    command = AUTH_HEADER.sub(r"\1<redacted>", command)
+    return PASSWORD_FLAG.sub(r"\1<redacted>", command)
+
+
+# -- classification ----------------------------------------------------------
+
+PRECEDENCE = ["test", "typecheck", "lint", "build", "install", "git", "other"]
+
+
+def _rules(*rows):
+    return [tuple(r.split()) for r in rows]
+
+
+KIND_RULES = [
+    ("test", tuple(_rules(
+        "pytest", "py.test", "tox", "nox", "jest", "vitest", "mocha", "go test",
+        "cargo test", "npm test", "npm run test", "yarn test", "pnpm test", "bun test",
+        "rspec", "phpunit", "dotnet test", "make test", "unittest"))),
+    ("typecheck", tuple(_rules(
+        "mypy", "pyright", "tsc", "npm run typecheck", "npm run type-check"))),
+    ("lint", tuple(_rules(
+        "ruff", "flake8", "pylint", "black --check", "eslint", "prettier --check",
+        "golangci-lint", "cargo clippy", "rubocop", "npm run lint", "make lint"))),
+    ("build", tuple(_rules(
+        "make", "npm run build", "yarn build", "pnpm build", "cargo build", "go build",
+        "docker build", "gradle", "./gradlew", "mvn", "python -m build"))),
+    ("install", tuple(_rules(
+        "pip install", "pip3 install", "uv pip install", "uv add", "uv sync",
+        "poetry install", "poetry add", "npm install", "npm i", "npm ci", "yarn add",
+        "yarn install", "pnpm install", "pnpm add", "go get", "cargo add",
+        "bundle install", "gem install", "brew install", "apt install",
+        "apt-get install"))),
+    ("git", (("git",),)),
+]
+
+
+def _normalize(argv):
+    """Drop npx / uv run / poetry run, and turn `python -m X` into X."""
+    argv = list(argv)
+    while argv:
+        if argv[0] == "npx" or argv[:2] in (["uv", "run"], ["poetry", "run"]):
+            argv = argv[1:] if argv[0] == "npx" else argv[2:]
+        elif (argv[0].startswith("python") and len(argv) > 2 and argv[1] == "-m"
+              and argv[2] != "build"):
+            argv = argv[2:]
+        else:
+            break
+    return argv
+
+
+def _kinds(command, rules, depth=0):
+    """Yield (kind, integration) for every simple command in `command`."""
+    segments = split_segments(command)
+    if segments is None:
+        segments = [command.split()]
+    if depth > MAX_DEPTH:
+        return
+    for seg in segments:
+        seg = unwrap(seg)
+        if not seg:
+            continue
+        script = nested_script(seg)
+        if script is not None:
+            yield from _kinds(script, rules, depth + 1)
+        argv = _normalize(seg)
+        for kind, prefixes in rules:
+            if any(tuple(argv[:len(p)]) == p for p in prefixes):
+                integ = kind == "test" and any(
+                    "integration" in a or "e2e" in a for a in argv[1:])
+                yield kind, integ
+
+
+def classify(command, extra_test):
+    """(kind, integration) for a shell command; the highest-precedence kind wins."""
+    rules = [(k, p + tuple(tuple(e.split()) for e in extra_test if e.split())
+              if k == "test" else p) for k, p in KIND_RULES]
+    best, integration = "other", False
+    for kind, integ in _kinds(command, rules):
+        if PRECEDENCE.index(kind) < PRECEDENCE.index(best):
+            best, integration = kind, False
+        if kind == best == "test":
+            integration = integration or integ
+    return best, integration
+
 
 
 # -- paths -------------------------------------------------------------------
@@ -96,9 +342,10 @@ def record(payload, root, cfg):
         row["edits"] = len(edits) if isinstance(edits, list) else 1
     command = inp.get("command")
     if tool in SHELL_TOOLS and isinstance(command, str):
-        # Task 3 replaces these two lines with redact() and classify().
-        row["command"] = command[:COMMAND_CAP]
-        row["kind"] = "other"
+        row["command"] = redact(command)[:COMMAND_CAP]  # redact first: a cap can't leak a prefix
+        row["kind"], integration = classify(command, cfg["testCommandKinds"])
+        if integration:
+            row["integration"] = True
 
     error = payload.get("error")
     if event == "post":
@@ -141,13 +388,16 @@ def prune(base, days, now, own=None, own_days=None):
 
 # -- main --------------------------------------------------------------------
 
-def retention_days(root):
+def load_cfg(root):
     try:
         sys.path.insert(0, COLLECT_DIR)
         import collect_recap  # the plugin's own collector; lazy so a failure fails open
-        return collect_recap.load_config(root)[0]["retentionDays"]
+        cfg = collect_recap.load_config(root)[0]
+        return {"retentionDays": cfg["retentionDays"],
+                "testCommandKinds": list(cfg["testCommandKinds"])}
     except Exception:
-        return DEFAULT_RETENTION_DAYS
+        return {"retentionDays": DEFAULT_RETENTION_DAYS,
+                "testCommandKinds": list(DEFAULT_TEST_KINDS)}
 
 
 def main():
@@ -159,8 +409,9 @@ def main():
     root = repo_root(payload.get("cwd") or os.getcwd())
     if not root:
         return
-    days = retention_days(root)
-    row = record(payload, root, {"retentionDays": days})
+    cfg = load_cfg(root)
+    days = cfg["retentionDays"]
+    row = record(payload, root, cfg)
     home = Path.home()
     if row:
         d = log_dir(home, root)
