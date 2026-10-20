@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -160,31 +161,51 @@ def resolve_since(root, since, base, rows):
     return mb, "merge-base"
 
 
+MAX_COUNT_BYTES = 10 * 1024 * 1024
+
+
 def count_lines(path):
-    """(lines, binary) for an untracked file."""
+    """(lines, binary) for an untracked file; (None, False) when over the cap.
+    Only regular files are read; symlinks, FIFOs and the like count as 0."""
     try:
-        data = Path(path).read_bytes()
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode):
+            return 0, False
+        if st.st_size > MAX_COUNT_BYTES:
+            return None, False
+        lines, last, first = 0, b"", True
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                if first and b"\0" in chunk[:8000]:
+                    return 0, True
+                first = False
+                lines += chunk.count(b"\n")
+                last = chunk[-1:]
     except OSError:
         return 0, False
-    if b"\0" in data[:8000]:
-        return 0, True
-    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0), False
+    return lines + (1 if last and last != b"\n" else 0), False
 
 
 STATUS = {"A": "added", "M": "modified", "D": "deleted", "R": "renamed", "T": "modified"}
 
 
 def change_facts(root, since):
+    def run(step, *args):
+        out = git(root, *args)
+        if out is None:
+            raise Failure("internal-error", "git %s failed" % step)
+        return out
+
     commits = []
     if git(root, "rev-parse", "--verify", "--quiet", "HEAD"):
         rng = ["HEAD"] if since == EMPTY_TREE else [since + "..HEAD"]
-        log = git(root, "log", "--format=%H%x00%s%x01", *rng) or ""
+        log = run("log", "log", "--format=%H%x00%s%x01", *rng)
         for rec in log.split("\x01"):
             sha, _, subject = rec.strip().partition("\x00")
             if sha:
                 commits.append({"sha": sha[:12], "subject": subject})
     files = {}
-    t = (git(root, "diff", "-M", "--name-status", "-z", since) or "").split("\0")
+    t = run("diff --name-status", "diff", "-M", "--name-status", "-z", since).split("\0")
     i = 0
     while i < len(t) and t[i]:
         st = t[i][0]
@@ -197,7 +218,7 @@ def change_facts(root, since):
             f["old_path"] = old
         f.update(insertions=0, deletions=0, binary=False)
         files[path] = f
-    n = (git(root, "diff", "-M", "--numstat", "-z", since) or "").split("\0")
+    n = run("diff --numstat", "diff", "-M", "--numstat", "-z", since).split("\0")
     i = 0
     while i < len(n) and n[i]:
         ins, dele, path = n[i].split("\t", 2)
@@ -209,11 +230,13 @@ def change_facts(root, since):
                 files[path]["binary"] = True
             else:
                 files[path]["insertions"], files[path]["deletions"] = int(ins), int(dele)
-    for path in (git(root, "ls-files", "-o", "--exclude-standard", "-z") or "").split("\0"):
+    for path in run("ls-files", "ls-files", "-o", "--exclude-standard", "-z").split("\0"):
         if path and path not in files:
             lines, binary = count_lines(os.path.join(root, path))
             files[path] = {"path": path, "status": "added", "insertions": lines,
                            "deletions": 0, "binary": binary}
+            if lines is None:
+                files[path]["too_large"] = True
     out = sorted(files.values(), key=lambda f: f["path"])
     by_area, by_type = {}, {}
     for f in out:
@@ -224,7 +247,7 @@ def change_facts(root, since):
     return {
         "commits": commits, "files": out,
         "totals": {"files": len(out),
-                   "insertions": sum(f["insertions"] for f in out),
+                   "insertions": sum(f["insertions"] or 0 for f in out),
                    "deletions": sum(f["deletions"] for f in out)},
         "by_area": by_area, "by_type": by_type,
     }
@@ -268,7 +291,10 @@ def main(argv):
         commit, source = resolve_since(root, args.since, args.base or cfg["baseBranch"], rows)
     except Failure as e:
         return fail(e.code, str(e))
-    changes = change_facts(root, commit)
+    try:
+        changes = change_facts(root, commit)
+    except Failure as e:
+        return fail(e.code, str(e))
     return {
         "ok": True, "config": cfg, "warnings": warnings, "save_requested": args.save,
         "since": {"commit": commit, "source": source},

@@ -562,3 +562,55 @@ def test_malformed_log_lines_skipped(tmp_path):
     rows = collect.read_log(f)
     assert rows == [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}]
     assert collect.read_log(None) == []
+
+
+# -- fix round 1 -------------------------------------------------------------
+
+@pytest.mark.parametrize("step", ["--name-status", "--numstat", "ls-files", "log"])
+def test_git_failure_is_error_not_empty(repo, monkeypatch, step):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    real = collect.git
+
+    def broken(cwd, *args):
+        return None if step in args and "rev-parse" not in args else real(cwd, *args)
+
+    monkeypatch.setattr(collect, "git", broken)
+    monkeypatch.chdir(repo)
+    out = collect.main(["--since", base])
+    assert out["ok"] is False
+    assert out["error"]["code"] == "internal-error"
+    assert "empty" not in out
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_untracked_fifo_does_not_hang(repo):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    os.mkfifo(str(repo / "pipe"))
+    out = run_collect(repo, "--since", base)  # git itself never lists a FIFO
+    assert out["ok"] is True
+    f = collect.count_lines(str(repo / "pipe"))
+    assert f == (0, False)
+
+
+def test_untracked_symlink_not_followed(repo):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    (repo / "big.txt").write_text("x\ny\n")
+    os.symlink("big.txt", str(repo / "link"))
+    out = run_collect(repo, "--since", base)
+    assert by_path(out)["link"]["insertions"] == 0
+    assert by_path(out)["big.txt"]["insertions"] == 2
+
+
+def test_untracked_file_over_cap_is_too_large(repo, monkeypatch):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    (repo / "big.txt").write_text("x\n" * 100)
+    monkeypatch.setattr(collect, "MAX_COUNT_BYTES", 50)
+    f = {x["path"]: x for x in collect.change_facts(str(repo), base)["files"]}["big.txt"]
+    assert f["insertions"] is None and f["too_large"] is True
+
+
+def test_missing_named_session_has_no_log(repo, home, hook_env):
+    commit(repo, {"a.py": "1\n"}, "first")
+    write_log(home, repo, [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}], sid="other")
+    out = run_collect(repo, "--session", "ghost", env=hook_env)
+    assert out["session"] == {"id": None, "log_path": None, "events": 0}
