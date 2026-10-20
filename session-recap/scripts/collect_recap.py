@@ -165,6 +165,22 @@ def resolve_since(root, since, base, rows):
     return mb, "merge-base"
 
 
+def default_base(root, base, warnings):
+    """The configured base, or origin/HEAD's branch, master, or main when it doesn't exist.
+
+    Only for a base the user didn't pass with --base, which stays strict."""
+    def exists(ref):
+        return git(root, "rev-parse", "--verify", "--quiet", ref + "^{commit}") is not None
+    if exists(base):
+        return base
+    origin = git(root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    for ref in ([origin] if origin else []) + ["master", "main"]:
+        if ref != base and exists(ref):
+            warnings.append("baseBranch %r not found; using %r" % (base, ref))
+            return ref
+    return base
+
+
 MAX_COUNT_BYTES = 10 * 1024 * 1024
 
 
@@ -850,7 +866,8 @@ def main(argv):
     log = find_log(home, root, args.session)
     rows = read_log(log)
     try:
-        commit, source = resolve_since(root, args.since, args.base or cfg["baseBranch"], rows)
+        base = args.base or default_base(root, cfg["baseBranch"], warnings)
+        commit, source = resolve_since(root, args.since, base, rows)
     except Failure as e:
         return fail(e.code, str(e))
     try:

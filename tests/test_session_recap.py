@@ -659,6 +659,15 @@ def test_base_not_found(repo, hook_env):
     assert out["ok"] is False and out["error"]["code"] == "base-not-found"
 
 
+def test_default_base_falls_back_to_master(repo, hook_env):
+    # git's built-in default branch is still `master` on many machines and CI runners
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/master"], cwd=repo, check=True)
+    commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, env=hook_env)
+    assert out["ok"] is True and out["since"]["source"] == "merge-base"
+    assert any("master" in w for w in out["warnings"])
+
+
 def test_error_precedence(tmp_path, repo):
     assert run_collect(tmp_path, "--bogus")["error"]["code"] == "not-a-repo"
     commit(repo, {"a.py": "1\n"}, "first")
