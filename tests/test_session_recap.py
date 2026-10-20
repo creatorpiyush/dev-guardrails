@@ -287,6 +287,13 @@ DEFAULT_TESTS = ["pytest", "jest", "go test"]
     ("go test ./...", "test", False),
     ("uv run pytest", "test", False),
     ("echo 'unbalanced", "other", False),
+    ("/usr/bin/python3 -m pytest", "test", False),
+    ("./.venv/bin/pytest -q", "test", False),
+    (".venv/bin/python -m pytest", "test", False),
+    ("python3.11 -m pytest", "test", False),
+    ("node_modules/.bin/jest", "test", False),
+    ("/opt/homebrew/bin/ruff check", "lint", False),
+    ("C:/Python/python.exe -m pytest", "test", False),
 ])
 def test_classify_kinds(command, kind, integration):
     assert log_activity.classify(command, DEFAULT_TESTS) == (kind, integration)
@@ -323,3 +330,19 @@ def test_logged_command_is_redacted(repo, home, hook_env):
     assert rows[0]["kind"] == "other"
     _, _, rows = run_hook(post(repo, "Bash", {"command": "pytest tests/e2e"}), hook_env)
     assert rows[-1]["kind"] == "test" and rows[-1]["integration"] is True
+
+
+def test_redacts_user_flag_and_key_headers():
+    for cmd, secret in [
+        ("curl -u alice:s3cr3t https://x", "s3cr3t"),
+        ("curl --user alice:s3cr3t x", "s3cr3t"),
+        ("curl --user=alice:s3cr3t x", "s3cr3t"),
+        ('curl -H "X-Api-Key: k9secret" x', "k9secret"),
+        ("curl -H 'X-Auth-Token: abc123' x", "abc123"),
+        ('curl -H "Api-Key: zzz" x', "zzz"),
+        ("gpg --passphrase=hunter2", "hunter2"),
+    ]:
+        assert secret not in log_activity.redact(cmd), cmd
+    assert "alice:" in log_activity.redact("curl -u alice:s3cr3t x")
+    for cmd in ["curl -u $USER:$PASS x", "curl -u alice https://x", "curl -u alice:$PW x"]:
+        assert log_activity.redact(cmd) == cmd

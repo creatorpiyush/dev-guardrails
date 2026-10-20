@@ -180,7 +180,10 @@ KEY_BLOCK = re.compile(
 
 AUTH_HEADER = re.compile(r"(?i)(authorization:\s*(?:bearer|basic|token)?\s*)\S+")
 PASSWORD_FLAG = re.compile(
-    r"(?i)(--?(?:password|passwd|pass|token|secret|api[-_]?key)(?:=|\s+))(?![$<])\S+")
+    r"(?i)(--?(?:password|passwd|passphrase|pass|token|secret|api[-_]?key)(?:=|\s+))(?![$<])\S+")
+USER_FLAG = re.compile(r"(?i)((?:^|\s)(?:-u|--user)(?:=|\s+)[^\s:$<]+:)(?![$<])[^\s'\"]+")
+KEY_HEADER = re.compile(
+    r"(?i)((?:x-)?(?:api[-_]?key|auth[-_]?token|access[-_]?token)\s*:\s*)(?![$<])[^\s'\"]+")
 
 
 def redact(command):
@@ -191,6 +194,8 @@ def redact(command):
     for _name, rx, repl in EXTRA_REDACTIONS:
         command = rx.sub(repl, command)
     command = AUTH_HEADER.sub(r"\1<redacted>", command)
+    command = KEY_HEADER.sub(r"\1<redacted>", command)
+    command = USER_FLAG.sub(r"\1<redacted>", command)
     return PASSWORD_FLAG.sub(r"\1<redacted>", command)
 
 
@@ -215,7 +220,7 @@ KIND_RULES = [
         "golangci-lint", "cargo clippy", "rubocop", "npm run lint", "make lint"))),
     ("build", tuple(_rules(
         "make", "npm run build", "yarn build", "pnpm build", "cargo build", "go build",
-        "docker build", "gradle", "./gradlew", "mvn", "python -m build"))),
+        "docker build", "gradle", "./gradlew", "gradlew", "mvn", "python -m build"))),
     ("install", tuple(_rules(
         "pip install", "pip3 install", "uv pip install", "uv add", "uv sync",
         "poetry install", "poetry add", "npm install", "npm i", "npm ci", "yarn add",
@@ -229,6 +234,10 @@ KIND_RULES = [
 def _normalize(argv):
     """Drop npx / uv run / poetry run, and turn `python -m X` into X."""
     argv = list(argv)
+    if argv:  # path-qualified tools: /usr/bin/python3.11, .venv/bin/pytest, tool.exe
+        name = re.split(r"[\\/]", argv[0])[-1]
+        name = re.sub(r"(?i)\.exe$", "", name)
+        argv[0] = re.sub(r"^(python\d*)\.\d+$", r"\1", name) or argv[0]
     while argv:
         if argv[0] == "npx" or argv[:2] in (["uv", "run"], ["poetry", "run"]):
             argv = argv[1:] if argv[0] == "npx" else argv[2:]
