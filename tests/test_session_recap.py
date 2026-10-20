@@ -235,6 +235,19 @@ def test_retention_prunes_old_logs(repo, home, hook_env):
     os.utime(mid, (now - 13 * 86400,) * 2)
     run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
     assert not old.exists() and mid.exists()
+    assert not (home / ".claude" / "session-recap" / "otherhash" / "old.jsonl").exists()
+
+
+def test_repo_retention_only_shortens_its_own_logs(repo, home, hook_env):
+    base = home / ".claude" / "session-recap"
+    own = log_activity.log_dir(home, str(repo.resolve()))
+    other = base / "otherhash"
+    own.mkdir(parents=True)
+    other.mkdir(parents=True)
+    mine, theirs = own / "old.jsonl", other / "keep.jsonl"
+    for f in (mine, theirs):
+        f.write_text("{}\n")
+        os.utime(f, (time.time() - 13 * 86400,) * 2)
     write_config(repo, '{"retentionDays": 1}')
     run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
-    assert not mid.exists() and not other.exists()
+    assert not mine.exists() and theirs.exists()

@@ -24,7 +24,7 @@ from pathlib import Path
 HERE = os.path.dirname(os.path.abspath(__file__))
 COLLECT_DIR = os.path.join(HERE, "..", "scripts")
 
-DEFAULT_RETENTION_DAYS = 14  # used only if collect_recap.py fails to import
+DEFAULT_RETENTION_DAYS = 14  # other repos' logs always use this; also the import fallback
 COMMAND_CAP = 500
 SHELL_TOOLS = {"Bash", "PowerShell"}
 EXIT_CODE = re.compile(r"Exit code (\d+)")
@@ -118,12 +118,15 @@ def record(payload, root, cfg):
 
 # -- retention ---------------------------------------------------------------
 
-def prune(base, days, now):
-    """Delete *.jsonl older than `days` under base/*/, then empty hash dirs."""
-    cutoff = now - days * 86400
+def prune(base, days, now, own=None, own_days=None):
+    """Delete *.jsonl older than `days` under base/*/, then empty hash dirs.
+
+    The `own` hash dir (this repo's) uses `own_days` instead, so a repo's
+    checked-in retentionDays can never shorten another repo's retention."""
     for d in Path(base).iterdir():
         if not d.is_dir():
             continue
+        cutoff = now - (own_days if own_days is not None and d == own else days) * 86400
         for f in d.glob("*.jsonl"):
             try:
                 if f.stat().st_mtime < cutoff:
@@ -166,7 +169,8 @@ def main():
         with open(d / (safe_session(payload.get("session_id")) + ".jsonl"), "a",
                   encoding="utf-8") as f:
             f.write(line)
-    prune(home / ".claude" / "session-recap", days, time.time())
+    prune(home / ".claude" / "session-recap", DEFAULT_RETENTION_DAYS, time.time(),
+          log_dir(home, root), days)
 
 
 if __name__ == "__main__":
