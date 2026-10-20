@@ -1,0 +1,1191 @@
+"""Tests for session-recap/scripts/collect_recap.py.
+
+Each test builds a throwaway repo and runs the script as a subprocess.
+"""
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+COLLECT = ROOT / "session-recap" / "scripts" / "collect_recap.py"
+
+spec = importlib.util.spec_from_file_location("collect_recap", str(COLLECT))
+collect = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(collect)
+
+
+def run_collect(cwd, *args, env=None):
+    r = subprocess.run([sys.executable, str(COLLECT), *args], cwd=cwd, env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+@pytest.fixture
+def repo(tmp_path):
+    path = tmp_path / "repo"
+    path.mkdir()
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                    "init", "-q"], cwd=path, check=True, capture_output=True)
+    return path
+
+
+def write_config(root, text):
+    (root / ".claude").mkdir(exist_ok=True)
+    (root / ".claude" / "session-recap.json").write_text(text)
+
+
+def test_not_a_repo_is_json_error(tmp_path):
+    out = run_collect(tmp_path)
+    assert out["ok"] is False
+    assert out["error"]["code"] == "not-a-repo"
+
+
+def test_bad_arguments_is_json_error(repo):
+    out = run_collect(repo, "--bogus")
+    assert out["ok"] is False
+    assert out["error"]["code"] == "bad-arguments"
+
+
+def test_success_echoes_save_and_config(repo):
+    out = run_collect(repo, "--save")
+    assert out["ok"] is True
+    assert out["save_requested"] is True
+    assert out["config"] == collect.DEFAULT_CONFIG
+    assert out["warnings"] == []
+
+
+def test_config_defaults_when_missing(repo):
+    assert collect.load_config(str(repo)) == (collect.DEFAULT_CONFIG, [])
+
+
+def test_valid_config_overrides(repo):
+    write_config(repo, '{"retentionDays": 3, "autoRecap": true}')
+    cfg, warnings = collect.load_config(str(repo))
+    assert cfg["retentionDays"] == 3 and cfg["autoRecap"] is True
+    assert cfg["maxWords"] == 250 and warnings == []
+
+
+@pytest.mark.parametrize("text", [
+    '{"retentionDays": "x"}', '{"retentionDays": true}', '{"retentionDays": 0}',
+    '{"maxWords": 10}', '{"autoRecap": 1}', '{"baseBranch": ""}',
+    '{"testCommandKinds": ["pytest", ""]}', '{"testCommandKinds": "pytest"}',
+])
+def test_invalid_config_falls_back_with_warning(repo, text):
+    write_config(repo, text)
+    cfg, warnings = collect.load_config(str(repo))
+    assert cfg == collect.DEFAULT_CONFIG
+    assert len(warnings) == 1
+    key = text.split('"')[1]
+    assert key in warnings[0]
+
+
+def test_invalid_json_falls_back_with_warning(repo):
+    write_config(repo, "{nope")
+    cfg, warnings = collect.load_config(str(repo))
+    assert cfg == collect.DEFAULT_CONFIG
+    assert len(warnings) == 1
+
+
+def test_unknown_config_key_warns(repo):
+    write_config(repo, '{"colour": 1}')
+    cfg, warnings = collect.load_config(str(repo))
+    assert cfg == collect.DEFAULT_CONFIG
+    assert len(warnings) == 1 and "colour" in warnings[0]
+
+
+# -- log_activity hook -------------------------------------------------------
+
+HOOK = ROOT / "session-recap" / "hooks" / "log_activity.py"
+hook_spec = importlib.util.spec_from_file_location("log_activity", str(HOOK))
+log_activity = importlib.util.module_from_spec(hook_spec)
+hook_spec.loader.exec_module(log_activity)
+
+SENTINEL = "S3NTINEL"
+
+
+@pytest.fixture
+def home(tmp_path):
+    h = tmp_path / "home"
+    h.mkdir()
+    return h
+
+
+@pytest.fixture
+def hook_env(home):
+    e = dict(os.environ)
+    e.pop("SESSION_RECAP_DISABLE", None)
+    e["HOME"] = e["USERPROFILE"] = str(home)
+    return e
+
+
+def run_hook(payload, env):
+    stdin = payload if isinstance(payload, str) else json.dumps(payload)
+    r = subprocess.run([sys.executable, str(HOOK)], input=stdin, env=env,
+                        capture_output=True, text=True)
+    rows = []
+    base = Path(env["HOME"]) / ".claude" / "session-recap"
+    if base.is_dir():
+        for f in sorted(base.glob("*/*.jsonl")):
+            rows += [json.loads(line) for line in f.read_text().splitlines()]
+    return r.returncode, r.stdout, rows
+
+
+def post(repo, tool, tool_input, **extra):
+    return {"session_id": "s1", "cwd": str(repo), "hook_event_name": "PostToolUse",
+            "tool_name": tool, "tool_input": tool_input, "tool_use_id": "t1", **extra}
+
+
+def all_text(home):
+    return "".join(f.read_text() for f in home.rglob("*") if f.is_file())
+
+
+def test_edit_event_logs_path_and_count_not_content(repo, home, hook_env):
+    p = post(repo, "Write", {"file_path": str(repo / "a.py"), "content": SENTINEL})
+    rc, out, rows = run_hook(p, hook_env)
+    assert rc == 0 and out == ""
+    assert rows[0]["event"] == "post" and rows[0]["path"] == "a.py" and rows[0]["edits"] == 1
+    assert SENTINEL not in all_text(home)
+
+
+def test_multiedit_counts_edits(repo, hook_env):
+    edits = [{"old_string": "a", "new_string": "b"}] * 3
+    _, _, rows = run_hook(post(repo, "MultiEdit",
+                               {"file_path": str(repo / "a.py"), "edits": edits}), hook_env)
+    assert rows[0]["edits"] == 3
+
+
+def test_bash_post_logs_exit_zero_and_duration(repo, home, hook_env):
+    p = post(repo, "Bash", {"command": "ls"}, duration_ms=1234,
+             tool_response={"stdout": SENTINEL, "interrupted": False})
+    _, _, rows = run_hook(p, hook_env)
+    assert rows[0]["exit"] == 0 and rows[0]["duration_ms"] == 1234
+    assert SENTINEL not in all_text(home)
+
+
+def test_failure_event_logs_exit_code(repo, home, hook_env):
+    p = post(repo, "Bash", {"command": "false"}, hook_event_name="PostToolUseFailure",
+             error="Exit code 3\nboom " + SENTINEL)
+    _, _, rows = run_hook(p, hook_env)
+    assert rows[0]["event"] == "fail" and rows[0]["exit"] == 3
+    assert SENTINEL not in all_text(home)
+
+
+def test_session_id_cannot_escape_log_dir(repo, home, hook_env):
+    p = post(repo, "Bash", {"command": "ls"}, session_id="../../evil")
+    run_hook(p, hook_env)
+    files = [f for f in home.rglob("*.jsonl")]
+    assert len(files) == 1
+    assert files[0].name == "______evil.jsonl"
+    assert files[0].parent == log_activity.log_dir(home, str(repo.resolve()))
+
+
+def test_edit_path_relative_to_root_from_subdir(repo, hook_env):
+    (repo / "sub").mkdir()
+    p = post(repo, "Edit", {"file_path": str(repo.resolve() / "sub" / "x.py")}, cwd=str(repo / "sub"))
+    _, _, rows = run_hook(p, hook_env)
+    assert rows[0]["path"] == "sub/x.py"
+
+
+def test_outside_repo_logs_nothing(tmp_path, home, hook_env):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    rc, _, rows = run_hook(post(plain, "Bash", {"command": "ls"}), hook_env)
+    assert rc == 0 and rows == []
+
+
+def test_disable_env_var(repo, home, hook_env):
+    hook_env["SESSION_RECAP_DISABLE"] = "1"
+    rc, _, _ = run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert rc == 0 and not (home / ".claude" / "session-recap").exists()
+
+
+def test_malformed_stdin_fails_open(hook_env):
+    rc, out, _ = run_hook("{not json", hook_env)
+    assert rc == 0 and out == ""
+
+
+def test_log_write_error_fails_open(repo, home, hook_env):
+    (home / ".claude").mkdir()
+    (home / ".claude" / "session-recap").write_text("not a dir")
+    rc, out, _ = run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert rc == 0 and out == ""
+
+
+def test_pre_event_logged(repo, hook_env):
+    p = post(repo, "Bash", {"command": "pytest -q"}, hook_event_name="PreToolUse")
+    rc, out, rows = run_hook(p, hook_env)
+    assert rc == 0 and out == ""
+    assert rows[0]["event"] == "pre" and rows[0]["id"] == "t1"
+    assert rows[0]["kind"] == "test" and "exit" not in rows[0]
+    p = post(repo, "Edit", {"file_path": str(repo / "a.py")}, hook_event_name="PreToolUse")
+    assert run_hook(p, hook_env)[2][-1]["path"] == "a.py"
+
+
+def test_permission_denied_logged_redacted(repo, home, hook_env):
+    secret = "ghp_" + "A1b2" * 9
+    p = post(repo, "Bash", {"command": "curl -H 'Authorization: Bearer %s' x" % secret},
+             hook_event_name="PermissionDenied", reason="blocked token " + secret)
+    rc, out, rows = run_hook(p, hook_env)
+    assert rc == 0 and out == "" and rows[0]["event"] == "denied"
+    assert rows[0]["reason"].startswith("blocked token ") and secret not in all_text(home)
+
+
+def edits(repo, hook_env, n):
+    for i in range(n):
+        p = post(repo, "Edit", {"file_path": str(repo / ("f%d.py" % i))}, tool_use_id="e%d" % i)
+        run_hook(p, hook_env)
+
+
+def stop(repo, hook_env, **extra):
+    return run_hook({"session_id": "s1", "cwd": str(repo), "hook_event_name": "Stop",
+                     "stop_hook_active": False, **extra}, hook_env)
+
+
+def test_stop_silent_by_default(repo, hook_env):
+    edits(repo, hook_env, 3)
+    rc, out, rows = stop(repo, hook_env)
+    assert rc == 0 and out == "" and not any(r["event"] == "recap_suggested" for r in rows)
+
+
+def test_stop_suggests_once_when_enabled(repo, hook_env):
+    write_config(repo, '{"autoRecap": true}')
+    edits(repo, hook_env, 3)
+    rc, out, rows = stop(repo, hook_env)
+    msg = json.loads(out)["systemMessage"]
+    assert rc == 0 and "/session-recap:summary" in msg and "3 files" in msg
+    assert "decision" not in json.loads(out)
+    assert [r["event"] for r in rows].count("recap_suggested") == 1
+    assert stop(repo, hook_env)[1] == ""
+
+
+def test_stop_needs_three_files(repo, hook_env):
+    write_config(repo, '{"autoRecap": true}')
+    edits(repo, hook_env, 2)
+    assert stop(repo, hook_env)[1] == ""
+
+
+def test_stop_hook_active_is_silent(repo, hook_env):
+    write_config(repo, '{"autoRecap": true}')
+    edits(repo, hook_env, 3)
+    assert stop(repo, hook_env, stop_hook_active=True)[1] == ""
+
+
+def test_retention_prunes_old_logs(repo, home, hook_env):
+    other = home / ".claude" / "session-recap" / "otherhash"
+    other.mkdir(parents=True)
+    old, mid = other / "old.jsonl", other / "mid.jsonl"
+    old.write_text("{}\n")
+    mid.write_text("{}\n")
+    now = time.time()
+    os.utime(old, (now - 15 * 86400,) * 2)
+    os.utime(mid, (now - 13 * 86400,) * 2)
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert not old.exists() and mid.exists()
+    assert not (home / ".claude" / "session-recap" / "otherhash" / "old.jsonl").exists()
+
+
+def test_repo_retention_only_shortens_its_own_logs(repo, home, hook_env):
+    base = home / ".claude" / "session-recap"
+    own = log_activity.log_dir(home, str(repo.resolve()))
+    other = base / "otherhash"
+    own.mkdir(parents=True)
+    other.mkdir(parents=True)
+    mine, theirs = own / "old.jsonl", other / "keep.jsonl"
+    for f in (mine, theirs):
+        f.write_text("{}\n")
+        os.utime(f, (time.time() - 13 * 86400,) * 2)
+    write_config(repo, '{"retentionDays": 1}')
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert not mine.exists() and theirs.exists()
+
+
+def test_other_repos_marker_extends_retention(repo, home, hook_env):
+    other = home / ".claude" / "session-recap" / "otherhash"
+    other.mkdir(parents=True)
+    (other / "retention").write_text("30")
+    f = other / "mid.jsonl"
+    f.write_text("{}\n")
+    os.utime(f, (time.time() - 20 * 86400,) * 2)
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert f.exists()
+    os.utime(f, (time.time() - 31 * 86400,) * 2)
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert not f.exists()
+
+
+@pytest.mark.parametrize("marker", [None, "garbage", "", "1.5"])
+def test_missing_or_invalid_marker_means_14_days(repo, home, hook_env, marker):
+    other = home / ".claude" / "session-recap" / "otherhash"
+    other.mkdir(parents=True)
+    if marker is not None:
+        (other / "retention").write_text(marker)
+    f = other / "old.jsonl"
+    f.write_text("{}\n")
+    os.utime(f, (time.time() - 15 * 86400,) * 2)
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert not f.exists()
+
+
+def test_marker_is_clamped(tmp_path):
+    d = tmp_path / "h"
+    d.mkdir()
+    (d / "retention").write_text("99999")
+    assert log_activity.dir_days(d, 14) == 365
+    (d / "retention").write_text("0")
+    assert log_activity.dir_days(d, 14) == 1
+
+
+def test_hook_writes_own_retention_marker_when_changed(repo, home, hook_env):
+    write_config(repo, '{"retentionDays": 30}')
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    own = log_activity.log_dir(home, str(repo.resolve()))
+    marker = own / "retention"
+    assert marker.read_text().strip() == "30"
+    mtime = marker.stat().st_mtime_ns
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert marker.stat().st_mtime_ns == mtime
+    write_config(repo, '{"retentionDays": 7}')
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert marker.read_text().strip() == "7"
+
+
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
+
+
+@posix_only
+def test_log_dirs_and_files_are_private(repo, home, hook_env):
+    hook_env["UMASK_TEST"] = "1"
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    base = home / ".claude" / "session-recap"
+    own = log_activity.log_dir(home, str(repo.resolve()))
+    for d in (base, own):
+        assert d.stat().st_mode & 0o777 == 0o700, d
+    for f in own.iterdir():
+        assert f.stat().st_mode & 0o777 == 0o600, f
+
+
+# -- classify / redact ---------------------------------------------------------
+
+import random
+import string
+
+_rng = random.Random(4321)
+
+
+def _rand(n):
+    alphabet = "".join(c for c in string.ascii_letters + string.digits if c not in "xX")
+    return "".join(_rng.choice(alphabet) for _ in range(n))
+
+
+DEFAULT_TESTS = ["pytest", "jest", "go test"]
+
+
+@pytest.mark.parametrize("command,kind,integration", [
+    ("pytest -q", "test", False),
+    ("python -m pytest tests/x.py", "test", False),
+    ("cd a && npm test", "test", False),
+    ("sudo env X=1 pytest", "test", False),
+    ("bash -c 'cargo test'", "test", False),
+    ("pytest tests/integration", "test", True),
+    ("npx jest e2e/", "test", True),
+    ("ruff check .", "lint", False),
+    ("mypy src", "typecheck", False),
+    ("npm run build", "build", False),
+    ("pip install -r r.txt", "install", False),
+    ("git status", "git", False),
+    ("ls", "other", False),
+    ("pip install x && pytest", "test", False),
+    ("go test ./...", "test", False),
+    ("uv run pytest", "test", False),
+    ("echo 'unbalanced", "other", False),
+    ("/usr/bin/python3 -m pytest", "test", False),
+    ("./.venv/bin/pytest -q", "test", False),
+    (".venv/bin/python -m pytest", "test", False),
+    ("python3.11 -m pytest", "test", False),
+    ("node_modules/.bin/jest", "test", False),
+    ("/opt/homebrew/bin/ruff check", "lint", False),
+    ("C:/Python/python.exe -m pytest", "test", False),
+    ("npm run test:unit", "test", False),
+    ("npm run test", "test", False),
+    ("pnpm run test", "test", False),
+    ("pnpm test:unit", "test", False),
+    ("yarn run test", "test", False),
+    ("yarn test:unit", "test", False),
+    ("bundle exec rspec", "test", False),
+    ("bundle exec rake test", "test", False),
+    ("npm run test:e2e", "test", True),
+])
+def test_classify_kinds(command, kind, integration):
+    assert log_activity.classify(command, DEFAULT_TESTS) == (kind, integration)
+
+
+def test_classify_uses_config_test_commands():
+    assert log_activity.classify("bats t/", ["bats"])[0] == "test"
+    assert log_activity.classify("bats t/", DEFAULT_TESTS)[0] == "other"
+
+
+def test_redacts_tokens_and_url_credentials():
+    token = "gh" + "p_" + _rand(36)
+    out = log_activity.redact("curl -H x:%s https://user:hunter2@host/x" % token)
+    assert token not in out and "hunter2" not in out and "host/x" in out
+
+
+def test_redacts_header_and_multiline():
+    token = "gh" + "p_" + _rand(36)
+    out = log_activity.redact('curl -H "Authorization: Bearer abc.def" x')
+    assert "abc.def" not in out
+    assert "s3cr3t" not in log_activity.redact("login --password=s3cr3t")
+    assert "s3cr3t" not in log_activity.redact("login --password s3cr3t")
+    assert "--password=$PW" in log_activity.redact("login --password=$PW")
+    out = log_activity.redact("cat <<EOF\nline\n%s\nEOF" % token)
+    assert token not in out and "line" in out
+
+
+def test_logged_command_is_redacted(repo, home, hook_env):
+    token = "gh" + "p_" + _rand(36)
+    # the token straddles the 500-char cap: redaction must come before the cut
+    cmd = "echo " + "a" * (log_activity.COMMAND_CAP - 12) + " " + token
+    _, _, rows = run_hook(post(repo, "Bash", {"command": cmd}), hook_env)
+    assert token not in all_text(home) and token[:10] not in all_text(home)
+    assert rows[0]["kind"] == "other"
+    _, _, rows = run_hook(post(repo, "Bash", {"command": "pytest tests/e2e"}), hook_env)
+    assert rows[-1]["kind"] == "test" and rows[-1]["integration"] is True
+
+
+def test_redacts_user_flag_and_key_headers():
+    for cmd, secret in [
+        ("curl -u alice:s3cr3t https://x", "s3cr3t"),
+        ("curl --user alice:s3cr3t x", "s3cr3t"),
+        ("curl --user=alice:s3cr3t x", "s3cr3t"),
+        ('curl -H "X-Api-Key: k9secret" x', "k9secret"),
+        ("curl -H 'X-Auth-Token: abc123' x", "abc123"),
+        ('curl -H "Api-Key: zzz" x', "zzz"),
+        ("gpg --passphrase=hunter2", "hunter2"),
+    ]:
+        assert secret not in log_activity.redact(cmd), cmd
+    assert "alice:" in log_activity.redact("curl -u alice:s3cr3t x")
+    for cmd in ["curl -u $USER:$PASS x", "curl -u alice https://x", "curl -u alice:$PW x"]:
+        assert log_activity.redact(cmd) == cmd
+
+
+@pytest.mark.parametrize("cmd,secret", [
+    ("GITHUB_TOKEN=abcd1234efgh5678 gh api /user", "abcd1234efgh5678"),
+    ("export OPENAI_KEY=myrealsecretvalue123", "myrealsecretvalue123"),
+    ("cat > .env <<EOF\nDB_PASSWORD=hunter2hunter2\nAPI_TOKEN=zzzzqqqq\nEOF", "hunter2hunter2"),
+    ("cat > .env <<EOF\nDB_PASSWORD=hunter2hunter2\nAPI_TOKEN=zzzzqqqq\nEOF", "zzzzqqqq"),
+    ('echo "password: hunter2"', "hunter2"),
+    ("aws configure set aws_secret_access_key wJalrXUtnFEMIexample", "wJalrXUtnFEMIexample"),
+    ('curl -u admin:"my pass" https://x', "my pass"),
+    ('curl -u admin:"my pass" https://x', "pass\""),
+    ('login --password "two words"', "words"),
+    ("login --password 'two words'", "words"),
+    ("export DB_PASSWORD='a b c'", "a b c"),
+])
+def test_redacts_env_assignments_and_quoted_values(cmd, secret):
+    assert secret not in log_activity.redact(cmd), cmd
+
+
+def test_env_assignment_redaction_keeps_names_and_neighbours():
+    out = log_activity.redact("GITHUB_TOKEN=abcd1234efgh5678 gh api /user")
+    assert out.startswith("GITHUB_TOKEN=") and out.endswith("gh api /user")
+    out = log_activity.redact('curl -u admin:"my pass" https://x')
+    assert "admin:" in out and out.endswith("https://x")
+
+
+@pytest.mark.parametrize("cmd", [
+    "FOO=bar make", "export PATH=$PATH:/x", "login --password=$PW", "curl -u alice https://x",
+    "export API_TOKEN=$TOKEN", 'export API_TOKEN="${TOKEN}"', "export K_TOKEN=<your-token>",
+    "ls -la",
+])
+def test_redaction_leaves_safe_commands_unchanged(cmd):
+    assert log_activity.redact(cmd) == cmd
+
+
+@pytest.mark.parametrize("cmd", ["_key" * 25000, "auth_token_id" * 9000, "a=" * 50000],
+                         ids=["key-run", "token-run", "assignments"])
+def test_redaction_stays_fast_on_huge_commands(cmd):
+    start = time.monotonic()
+    log_activity.redact(cmd)
+    assert time.monotonic() - start < 1.0
+
+
+def test_redaction_still_covers_a_secret_past_the_log_cap():
+    cmd = "x" * (log_activity.COMMAND_CAP - 10) + " DB_PASSWORD=hunter2hunter2 && make"
+    assert "hunter2" not in log_activity.redact(cmd)[:log_activity.COMMAND_CAP]
+
+
+# -- change facts ------------------------------------------------------------
+
+def g(repo, *args, date=None):
+    e = dict(os.environ)
+    if date:
+        e["GIT_COMMITTER_DATE"] = e["GIT_AUTHOR_DATE"] = date
+    r = subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com",
+                        *args], cwd=repo, env=e, capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def commit(repo, files, msg, date="2026-10-20T09:00:00Z"):
+    for name, text in files.items():
+        f = repo / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+    g(repo, "add", "-A")
+    g(repo, "commit", "-q", "-m", msg, date=date)
+    return g(repo, "rev-parse", "HEAD")
+
+
+def by_path(out):
+    return {f["path"]: f for f in out["changes"]["files"]}
+
+
+def write_log(home, repo, rows, sid="s1"):
+    d = collect.log_dir(home, str(repo))
+    d.mkdir(parents=True, exist_ok=True)
+    (d / (sid + ".jsonl")).write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return d / (sid + ".jsonl")
+
+
+def test_change_facts_add_modify_delete_rename(repo):
+    body = "".join("line %d of a long enough file\n" % i for i in range(20))
+    base = commit(repo, {"a.py": "x\n", "b.py": "y\n", "old.txt": body, "keep.py": "k\n"}, "base")
+    (repo / "a.py").write_text("x\nz\n")
+    (repo / "b.py").unlink()
+    (repo / "new.py").write_text("n\n")
+    g(repo, "mv", "old.txt", "moved.txt")
+    (repo / "moved.txt").write_text(body + "extra\n")
+    g(repo, "add", "-A")
+    out = run_collect(repo, "--since", base)
+    f = by_path(out)
+    assert f["a.py"]["status"] == "modified" and f["a.py"]["insertions"] == 1
+    assert f["b.py"]["status"] == "deleted" and f["b.py"]["deletions"] == 1
+    assert f["new.py"]["status"] == "added"
+    assert f["moved.txt"]["status"] == "renamed" and f["moved.txt"]["old_path"] == "old.txt"
+    assert out["changes"]["totals"]["files"] == 4
+    assert out["changes"]["by_type"]["py"] == 3
+    assert out["changes"]["by_area"]["."] == 4
+    assert out["empty"] is False
+
+
+def test_uncommitted_and_untracked_counted(repo):
+    base = commit(repo, {"a.py": "x\n"}, "base")
+    (repo / "a.py").write_text("x\ny\n")
+    (repo / "src").mkdir()
+    (repo / "src" / "u.py").write_text("1\n2\n3\n")
+    out = run_collect(repo, "--since", base)
+    f = by_path(out)
+    assert f["a.py"]["status"] == "modified"
+    assert f["src/u.py"]["status"] == "added" and f["src/u.py"]["insertions"] == 3
+    assert len(out["changes"]["files"]) == 2
+    assert out["changes"]["by_area"]["src"] == 1
+
+
+def test_unborn_repo_change_facts(repo):
+    (repo / "u.py").write_text("1\n2\n")
+    out = run_collect(repo)
+    assert out["ok"] is True
+    assert out["since"] == {"commit": collect.EMPTY_TREE, "source": "empty-tree"}
+    assert out["changes"]["commits"] == []
+    assert by_path(out)["u.py"]["status"] == "added"
+    assert out["empty"] is False
+
+
+def test_since_ref_and_time(repo):
+    a = commit(repo, {"a.py": "1\n"}, "first", "2026-10-20T08:00:00Z")
+    commit(repo, {"b.py": "2\n"}, "second", "2026-10-20T10:00:00Z")
+    out = run_collect(repo, "--since", a)
+    assert out["since"] == {"commit": a, "source": "ref"}
+    assert [c["subject"] for c in out["changes"]["commits"]] == ["second"]
+    assert len(out["changes"]["commits"][0]["sha"]) == 12
+    for since in ("2026-10-20T09:00:00Z", "2026-10-20T09:00:00+00:00"):
+        out = run_collect(repo, "--since", since)
+        assert out["since"] == {"commit": a, "source": "time"}, since
+    out = run_collect(repo, "--since", "2026-10-19")
+    assert out["since"] == {"commit": collect.EMPTY_TREE, "source": "time"}
+    out = run_collect(repo, "--since", "2.hours.ago")
+    assert out["since"]["source"] == "time"
+
+
+@pytest.mark.parametrize("since", ["nonsense", "yesterday-ish", "not a time"])
+def test_since_unknown_is_error(repo, since):
+    commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, "--since", since)
+    assert out["ok"] is False and out["error"]["code"] == "since-not-found"
+
+
+def test_default_since_is_session_start(repo, home, hook_env):
+    a = commit(repo, {"a.py": "1\n"}, "first", "2026-10-20T08:00:00Z")
+    commit(repo, {"b.py": "2\n"}, "second", "2026-10-20T10:00:00Z")
+    path = write_log(home, repo, [
+        {"ts": "2026-10-20T09:30:00Z", "event": "post", "tool": "Edit", "path": "b.py"},
+        {"ts": "2026-10-20T09:00:00Z", "event": "pre", "tool": "Edit"},
+    ])
+    out = run_collect(repo, env=hook_env)
+    assert out["since"] == {"commit": a, "source": "session-start"}
+    assert out["session"]["id"] == "s1"
+    assert out["session"]["events"] == 2
+    assert out["session"]["log_path"] == str(path)
+
+
+def test_session_flag_selects_log(repo, home, hook_env):
+    commit(repo, {"a.py": "1\n"}, "first")
+    write_log(home, repo, [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}], sid="old")
+    write_log(home, repo, [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}] * 3, sid="new")
+    out = run_collect(repo, "--session", "old", env=hook_env)
+    assert out["session"]["id"] == "old" and out["session"]["events"] == 1
+
+
+def test_default_since_merge_base_without_log(repo, hook_env):
+    a = commit(repo, {"a.py": "1\n"}, "first")
+    g(repo, "branch", "-M", "main")
+    g(repo, "checkout", "-q", "-b", "feat/x")
+    commit(repo, {"b.py": "2\n"}, "second")
+    out = run_collect(repo, env=hook_env)
+    assert out["since"] == {"commit": a, "source": "merge-base"}
+    assert out["session"] == {"id": None, "log_path": None, "events": 0}
+
+
+def test_base_not_found(repo, hook_env):
+    commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, "--base", "nope", env=hook_env)
+    assert out["ok"] is False and out["error"]["code"] == "base-not-found"
+
+
+def test_default_base_falls_back_to_master(repo, hook_env):
+    # git's built-in default branch is still `master` on many machines and CI runners
+    subprocess.run(["git", "symbolic-ref", "HEAD", "refs/heads/master"], cwd=repo, check=True)
+    commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, env=hook_env)
+    assert out["ok"] is True and out["since"]["source"] == "merge-base"
+    assert any("master" in w for w in out["warnings"])
+
+
+def test_error_precedence(tmp_path, repo):
+    assert run_collect(tmp_path, "--bogus")["error"]["code"] == "not-a-repo"
+    commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, "--bogus")
+    assert out["error"]["code"] == "bad-arguments"
+    out = run_collect(repo, "--since", "nonsense", "--base", "nope")
+    assert out["error"]["code"] == "since-not-found"
+
+
+def test_no_changes_is_empty(repo):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    out = run_collect(repo, "--since", base)
+    assert out["changes"]["files"] == [] and out["changes"]["commits"] == []
+    assert out["empty"] is True
+
+
+def test_malformed_log_lines_skipped(tmp_path):
+    f = tmp_path / "x.jsonl"
+    f.write_text('garbage\n[1, 2]\n{"ts": "2026-10-20T09:00:00Z", "ev\n'
+                 '{"ts": "2026-10-20T09:00:00Z", "event": "pre"}\n')
+    rows = collect.read_log(f)
+    assert rows == [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}]
+    assert collect.read_log(None) == []
+
+
+# -- fix round 1 -------------------------------------------------------------
+
+@pytest.mark.parametrize("step", ["--name-status", "--numstat", "ls-files", "log"])
+def test_git_failure_is_error_not_empty(repo, monkeypatch, step):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    real = collect.git
+
+    def broken(cwd, *args):
+        return None if step in args and "rev-parse" not in args else real(cwd, *args)
+
+    monkeypatch.setattr(collect, "git", broken)
+    monkeypatch.chdir(repo)
+    out = collect.main(["--since", base])
+    assert out["ok"] is False
+    assert out["error"]["code"] == "internal-error"
+    assert "empty" not in out
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs mkfifo")
+def test_untracked_fifo_does_not_hang(repo):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    os.mkfifo(str(repo / "pipe"))
+    out = run_collect(repo, "--since", base)  # git itself never lists a FIFO
+    assert out["ok"] is True
+    f = collect.count_lines(str(repo / "pipe"))
+    assert f == (0, False)
+
+
+def test_untracked_symlink_not_followed(repo):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    (repo / "big.txt").write_text("x\ny\n")
+    os.symlink("big.txt", str(repo / "link"))
+    out = run_collect(repo, "--since", base)
+    assert by_path(out)["link"]["insertions"] == 0
+    assert by_path(out)["big.txt"]["insertions"] == 2
+
+
+def test_untracked_file_over_cap_is_too_large(repo, monkeypatch):
+    base = commit(repo, {"a.py": "1\n"}, "first")
+    (repo / "big.txt").write_text("x\n" * 100)
+    monkeypatch.setattr(collect, "MAX_COUNT_BYTES", 50)
+    f = {x["path"]: x for x in collect.change_facts(str(repo), base)["files"]}["big.txt"]
+    assert f["insertions"] is None and f["too_large"] is True
+
+
+def test_missing_named_session_has_no_log(repo, home, hook_env):
+    commit(repo, {"a.py": "1\n"}, "first")
+    write_log(home, repo, [{"ts": "2026-10-20T09:00:00Z", "event": "pre"}], sid="other")
+    out = run_collect(repo, "--session", "ghost", env=hook_env)
+    assert out["session"] == {"id": None, "log_path": None, "events": 0}
+
+
+# -- impact signals ----------------------------------------------------------
+
+def impact(repo, base):
+    return run_collect(repo, "--since", base)["impact"]
+
+
+def sig(items, name):
+    return [i for i in items if i["signal"] == name]
+
+
+def test_signal_public_api_and_signature(repo):
+    base = commit(repo, {"svc.py": "def keep(a):\n    pass\n\ndef old_fn():\n    pass\n"}, "b")
+    (repo / "svc.py").write_text(
+        "def keep(a, b):\n    pass\n\ndef _private():\n    pass\n\n"
+        "class NewThing:\n    pass\n")
+    items = impact(repo, base)
+    api = {(i["file"], i["evidence"]) for i in sig(items, "public-api")}
+    assert ("svc.py", "+NewThing") in api and ("svc.py", "-old_fn") in api
+    assert not any("_private" in i["evidence"] for i in items)
+    assert [i["evidence"] for i in sig(items, "signature")] == ["keep"]
+
+
+def test_signal_migration(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / "db" / "migrations").mkdir(parents=True)
+    (repo / "db" / "migrations" / "0001_init.py").write_text("x = 1\n")
+    (repo / "q.sql").write_text("select 1;\n")
+    files = {i["file"] for i in sig(impact(repo, base), "migration")}
+    assert files == {"db/migrations/0001_init.py", "q.sql"}
+
+
+def test_signal_dependency_versions(repo):
+    base = commit(repo, {"requirements.txt": "requests==2.31.0\nflask==2.0\n"}, "b")
+    (repo / "requirements.txt").write_text("requests==2.32.0\nrich>=13\n")
+    ev = {i["evidence"] for i in sig(impact(repo, base), "dependency")}
+    assert ev == {"requests 2.31.0→2.32.0", "+rich 13", "-flask"}
+
+
+def test_signal_lockfile(repo):
+    base = commit(repo, {"go.sum": "a\n"}, "b")
+    (repo / "go.sum").write_text("b\n")
+    items = impact(repo, base)
+    assert [i["file"] for i in sig(items, "lockfile")] == ["go.sum"]
+    assert not sig(items, "config") and not sig(items, "dependency")
+
+
+def test_signal_ci(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    (repo / ".github" / "workflows" / "ci.yml").write_text("on: push\n")
+    items = impact(repo, base)
+    assert [i["file"] for i in sig(items, "ci")] == [".github/workflows/ci.yml"]
+    assert not sig(items, "config")
+
+
+def test_signal_deleted_file(repo):
+    base = commit(repo, {"gone.py": "x = 1\n", "k.py": "y = 1\n"}, "b")
+    (repo / "gone.py").unlink()
+    assert [i["file"] for i in sig(impact(repo, base), "deleted")] == ["gone.py"]
+
+
+def test_test_files_get_no_api_or_signature_signals(repo):
+    base = commit(repo, {"tests/test_a.py": "def test_old(a):\n    pass\n"}, "b")
+    (repo / "tests" / "test_a.py").write_text(
+        "def test_old(a, b):\n    pass\n\ndef test_new():\n    pass\n")
+    (repo / "tests" / "helper.py").write_text("def helper():\n    pass\n")
+    items = impact(repo, base)
+    assert not sig(items, "public-api") and not sig(items, "signature")
+
+
+def test_impact_items_capped_per_file_per_signal(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / "big.py").write_text("".join("def f%02d():\n    pass\n" % i for i in range(25)))
+    items = [i for i in impact(repo, base) if i["file"] == "big.py"]
+    api = sig(items, "public-api")
+    assert len(api) == 11
+    assert api[-1] == {"signal": "public-api", "file": "big.py",
+                       "evidence": "15 more not shown", "truncated": 15}
+    assert len([i for i in api if "truncated" not in i]) == 10
+
+
+def test_signal_env_var_names_only(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / "app.py").write_text(
+        'import os\nK = os.environ["API_KEY"]\nH = os.getenv("HOST", "S3NTINEL")\n')
+    (repo / "app.js").write_text("const p = process.env.PORT\n")
+    (repo / "Dockerfile").write_text("FROM x\nENV MODE=S3NTINEL\nARG BUILD_ID\n")
+    out = run_collect(repo, "--since", base)
+    names = {i["evidence"] for i in sig(out["impact"], "env-var")}
+    assert names == {"API_KEY", "HOST", "PORT", "MODE", "BUILD_ID"}
+    assert "S3NTINEL" not in json.dumps(out)
+    assert sig(out["impact"], "infra")
+
+
+def test_blast_radius_python_and_js(repo):
+    base = commit(repo, {
+        "pkg/__init__.py": "", "pkg/core.py": "def f():\n    pass\n",
+        "pkg/user.py": "from pkg.core import f\n",
+        "other.py": "import pkg.core\n", "noise.py": "# core mention\nx = 1\n",
+        "web/util.js": "export const u = 1\n",
+        "web/app.js": "import { u } from './util'\n",
+        "web/sub/x.ts": "import u from '../util.js'\n",
+    }, "b")
+    (repo / "pkg" / "core.py").write_text("def f(x):\n    pass\n")
+    (repo / "web" / "util.js").write_text("export const u = 2\n")
+    imp = sig(impact(repo, base), "importer")
+    got = {(i["file"], i["evidence"]) for i in imp}
+    assert got == {("pkg/core.py", "pkg/user.py"), ("pkg/core.py", "other.py"),
+                   ("web/util.js", "web/app.js"), ("web/util.js", "web/sub/x.ts")}
+
+
+def test_blast_radius_cap_and_changed_files_excluded(repo):
+    files = {"lib.py": "x = 1\n", "also.py": "import lib\n"}
+    files.update({"u%02d.py" % i: "import lib\n" for i in range(25)})
+    base = commit(repo, files, "b")
+    (repo / "lib.py").write_text("x = 2\n")
+    (repo / "also.py").write_text("import lib\ny = 1\n")
+    imp = sig(impact(repo, base), "importer")
+    assert len(imp) == 20 and all(i["evidence"] != "also.py" for i in imp)
+    assert all(i.get("truncated") is True for i in imp)
+
+
+def test_secret_file_diff_not_read(repo):
+    base = commit(repo, {".env": "A=1\n"}, "b")
+    (repo / ".env").write_text("A=S3NTINEL\nAPI=os.environ['LEAK']\n")
+    out = run_collect(repo, "--since", base)
+    assert [(i["signal"], i["file"]) for i in out["impact"]] == [("config", ".env")]
+    assert "S3NTINEL" not in json.dumps(out) and "LEAK" not in json.dumps(out)
+
+
+def test_untracked_secret_and_source_files(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / ".env.local").write_text("X=S3NTINEL\n")
+    (repo / "new.py").write_text("def fresh():\n    pass\n")
+    out = run_collect(repo, "--since", base)
+    assert "S3NTINEL" not in json.dumps(out)
+    assert ("new.py", "+fresh") in {(i["file"], i["evidence"])
+                                    for i in sig(out["impact"], "public-api")}
+
+
+def test_failed_file_diff_warns_not_fails(repo, monkeypatch):
+    base = commit(repo, {"a.py": "def f():\n    pass\n"}, "b")
+    (repo / "a.py").write_text("def g():\n    pass\n")
+    real = collect.git
+
+    def flaky(cwd, *args):
+        return None if args[:2] == ("diff", "-U0") else real(cwd, *args)
+
+    monkeypatch.setattr(collect, "git", flaky)
+    warnings = []
+    items = collect.impact_signals(str(repo), base,
+                                   [{"path": "a.py", "status": "modified"}], warnings)
+    assert not sig(items, "public-api") and any("a.py" in w for w in warnings)
+
+
+def test_go_importer_matches_whole_path_segment(repo):
+    base = commit(repo, {
+        "go.mod": "module x\n", "auth/a.go": "package auth\n",
+        "m/real.go": 'package m\nimport "github.com/o/x/auth"\n',
+        "m/near.go": 'package m\nimport "github.com/o/oauth"\n',
+        "m/near2.go": 'package m\nimport "github.com/o/myauth"\n',
+    }, "b")
+    (repo / "auth" / "a.go").write_text("package auth\nfunc Login() {}\n")
+    imp = sig(impact(repo, base), "importer")
+    assert [i["evidence"] for i in imp] == ["m/real.go"]
+
+
+def test_deleted_secret_file_keeps_deleted_signal(repo):
+    base = commit(repo, {".env": "A=S3NTINEL\n"}, "b")
+    (repo / ".env").unlink()
+    out = run_collect(repo, "--since", base)
+    assert {(i["signal"], i["file"]) for i in out["impact"]} == {
+        ("config", ".env"), ("deleted", ".env")}
+    assert "S3NTINEL" not in json.dumps(out)
+
+
+def test_toml_dependencies_only_in_dependency_sections(repo):
+    base = commit(repo, {"pyproject.toml": (
+        '[tool.myapp]\ntoken = "old1"\n\n[tool.poetry.dependencies]\nrequests = "^2.30"\n'
+        '\n[project]\nname = "p"\ndependencies = [\n  "flask>=2.0",\n]\n')}, "b")
+    (repo / "pyproject.toml").write_text(
+        '[tool.myapp]\ntoken = "9S3NTINEL"\n\n[tool.poetry.dependencies]\nrequests = "^2.31"\n'
+        '\n[project]\nname = "q"\ndependencies = [\n  "flask>=2.1",\n]\n')
+    out = run_collect(repo, "--since", base)
+    ev = {i["evidence"] for i in sig(out["impact"], "dependency")}
+    assert ev == {"requests ^2.30→^2.31", "flask 2.0→2.1"}
+    assert "S3NTINEL" not in json.dumps(out)
+
+
+def test_toml_change_outside_dependency_sections_is_generic(repo):
+    base = commit(repo, {"Cargo.toml": '[package]\nname = "a"\n[dependencies]\nserde = "1"\n'}, "b")
+    (repo / "Cargo.toml").write_text('[package]\nname = "b"\n[dependencies]\nserde = "1"\n')
+    out = run_collect(repo, "--since", base)
+    assert [i["evidence"] for i in sig(out["impact"], "dependency")] == ["manifest changed"]
+
+
+def test_importer_search_stops_reading_at_cap(repo, monkeypatch):
+    files = {"lib.py": "x = 1\n"}
+    files.update({"u%d.py" % i: "import lib\n" for i in range(5)})
+    base = commit(repo, files, "b")
+    (repo / "lib.py").write_text("x = 2\n")
+    monkeypatch.setattr(collect, "MAX_IMPORTERS", 2)
+    reads = []
+    real = collect.read_regular
+    monkeypatch.setattr(collect, "read_regular",
+                        lambda p: reads.append(p) or real(p))
+    f = {"path": "lib.py", "status": "modified"}
+    found, cut = collect.importers(str(repo), f, {"lib.py"})
+    assert len(found) == 2 and cut is True
+    assert len(reads) <= 3
+
+
+# -- test facts, efficiency, project facts, previous recap -------------------
+
+def row(ts, event, tool="Bash", **kw):
+    return {"ts": "2026-10-20T" + ts + "Z", "event": event, "tool": tool, **kw}
+
+
+def py_files(*paths):
+    return [{"path": p, "status": "modified", "insertions": 1, "deletions": 0, "binary": False}
+            for p in paths]
+
+
+def test_no_test_run_recorded_without_log(repo):
+    commit(repo, {"a.py": "1\n"}, "first")
+    r = subprocess.run([sys.executable, str(COLLECT)], cwd=repo, capture_output=True, text=True)
+    assert "tests passed" not in r.stdout
+    out = json.loads(r.stdout)
+    assert out["tests"]["status"] == "no test run recorded"
+    assert out["tests"]["kinds_ran"] == []
+
+
+@pytest.mark.parametrize("event,extra", [("post", {"exit": 0}), ("fail", {"exit": 1})])
+def test_recorded_status_never_claims_pass(repo, home, hook_env, event, extra):
+    commit(repo, {"a.py": "1\n"}, "first")
+    write_log(home, repo, [row("09:00:00", event, command="pytest", kind="test", id="1", **extra)])
+    r = subprocess.run([sys.executable, str(COLLECT)], cwd=repo, env=hook_env,
+                       capture_output=True, text=True)
+    assert "tests passed" not in r.stdout
+    assert json.loads(r.stdout)["tests"]["status"] == "recorded"
+
+
+def test_stale_test_warning():
+    rows = [row("09:00:00", "post", command="pytest", kind="test", id="1", exit=0),
+            row("09:05:00", "post", "Edit", path="a.py", edits=1, id="2")]
+    t = collect.test_facts(py_files("a.py"), rows)
+    assert t["stale"] is True
+    assert t["last_test_ts"] == "2026-10-20T09:00:00Z"
+    assert t["last_edit_ts"] == "2026-10-20T09:05:00Z"
+    rows.append(row("09:10:00", "post", command="pytest", kind="test", id="3", exit=0))
+    assert collect.test_facts(py_files("a.py"), rows)["stale"] is False
+
+
+def test_fail_then_pass_pattern():
+    rows = [row("09:00:00", "fail", command="pytest", kind="test", id="1", exit=1, duration_ms=100),
+            row("09:01:00", "post", command="pytest", kind="test", id="2", exit=0, duration_ms=50),
+            row("09:02:00", "post", command="ruff .", kind="lint", id="3", exit=0),
+            row("09:02:30", "pre", command="pytest -k x", kind="test", id="4"),
+            row("09:03:00", "post", command="pytest tests/it", kind="test", integration=True,
+                id="5", exit=0)]
+    t = collect.test_facts([], rows)
+    c = t["commands"]["pytest"]
+    assert c == {"kind": "test", "runs": 2, "passes": 1, "failures": 1,
+                 "fail_then_pass": True, "total_ms": 150}
+    assert "pytest -k x" not in t["commands"]
+    assert t["kinds_ran"] == ["integration", "lint", "unit"]
+
+
+def test_repeated_edit_and_failure_detection():
+    rows = [row("09:0%d:00" % i, "post", "Edit", path="a.py", edits=1, id="e%d" % i)
+            for i in range(3)]
+    rows += [row("09:1%d:00" % i, "fail", command="make build", kind="build", id="f%d" % i, exit=2)
+             for i in range(2)]
+    rows += [row("09:20:00", "post", "Edit", path="b.py", edits=1, id="b")]
+    e = collect.efficiency(rows, [])
+    assert e["files_edited_3plus"] == [{"path": "a.py", "edits": 3}]
+    assert e["repeated_failures"] == [{"command": "make build", "failures": 2}]
+    assert e["active_span_s"] == 20 * 60
+
+
+def test_no_result_inferred_for_pre_without_post():
+    rows = [row("09:00:00", "pre", command="rm x", kind="other", id="1"),
+            row("09:00:01", "pre", command="ls", kind="other", id="2"),
+            row("09:00:02", "post", command="ls", kind="other", id="2", exit=0),
+            row("09:00:03", "denied", reason="no"),
+            row("09:00:04", "post", command="pip install x", kind="install", id="3", exit=0)]
+    e = collect.efficiency(rows, [])
+    assert e["no_result"]["label"] == "blocked, denied, or interrupted (inferred)"
+    assert [i["command"] for i in e["no_result"]["items"]] == ["rm x"]
+    assert len(e["denied"]) == 1
+    assert e["installs"] == ["pip install x"]
+
+
+def test_own_collector_call_is_not_no_result():
+    rows = [row("09:00:00", "pre", id="1",
+                command='python3 "/p/session-recap/scripts/collect_recap.py" --session s1'),
+            row("09:00:01", "pre", id="2", command="rm x")]
+    e = collect.efficiency(rows, [])
+    assert [i["command"] for i in e["no_result"]["items"]] == ["rm x"]
+
+
+def test_efficiency_lists_capped_with_truncated_counts():
+    rows = []
+    for i in range(30):
+        rows.append(row("09:00:00", "pre", id="p%d" % i, command="rm %d" % i))
+        rows.append(row("09:00:01", "post", id="i%d" % i, command="pip install p%d" % i,
+                        kind="install", exit=0))
+        rows.append(row("09:00:02", "denied", reason="no %d" % i))
+        for _ in range(3):
+            rows.append(row("09:00:03", "post", id="e", path="f%d.py" % i, edits=1, tool="Edit"))
+    e = collect.efficiency(rows, [])
+    assert len(e["installs"]) == len(e["denied"]) == len(e["no_result"]["items"]) == 20
+    assert len(e["files_edited_3plus"]) == 20
+    assert e["truncated"] == {"installs": 10, "denied": 10, "no_result": 10,
+                              "files_edited_3plus": 10}
+    assert "truncated" not in collect.efficiency([row("09:00:00", "pre", id="1")], [])
+
+
+def test_longest_commands_top_five():
+    rows = [row("09:00:%02d" % i, "post", command="c%d" % i, kind="other", id=str(i),
+                exit=0, duration_ms=i * 10) for i in range(7)]
+    assert [c["command"] for c in collect.efficiency(rows, [])["longest_commands"]] == \
+        ["c6", "c5", "c4", "c3", "c2"]
+
+
+@pytest.mark.parametrize("command, full", [
+    ("pytest .", True), ("pytest ./", True), ("go test ./...", True),
+    ("go test ./pkg/...", False), ("pytest tests", False),
+])
+def test_root_args_are_full_suite_and_go_patterns_are_paths(repo, command, full):
+    (repo / "pkg").mkdir()
+    (repo / "tests").mkdir()
+    assert collect.is_full_suite(command, str(repo)) is full
+
+
+def test_full_suite_with_targeted_suggestion(repo, monkeypatch):
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_a.py").write_text("")
+    monkeypatch.chdir(repo)
+    rows = [row("09:00:00", "post", command="python -m pytest", kind="test", id="1", exit=0),
+            row("09:01:00", "post", command="pytest tests/test_a.py", kind="test", id="2", exit=0),
+            row("09:02:00", "post", command="npx jest -t foo", kind="test", id="3", exit=0),
+            row("09:03:00", "post", command="pytest -k foo", kind="test", id="4", exit=0),
+            row("09:04:00", "post", command="go test ./...", kind="test", id="5", exit=0)]
+    files = py_files("tests/test_a.py", "a.py")
+    e = collect.efficiency(rows, files, str(repo))
+    assert [r["command"] for r in e["full_suite_runs"]] == ["python -m pytest", "go test ./..."]
+    assert e["full_suite_runs"][0]["suggested"] == "python -m pytest tests/test_a.py"
+    assert collect.efficiency(rows, py_files("a.py"), str(repo))["full_suite_runs"][0]["suggested"] is None
+
+
+def test_untested_files():
+    files = py_files("src/foo.py", "src/bar.py", "tests/test_foo.py", "README.md", "cfg.json",
+                     "web/baz.ts", "web/baz.test.ts", "qux.go", "qux_test.go", "lone.go")
+    t = collect.test_facts(files, [])
+    assert sorted(t["untested_files"]) == ["lone.go", "src/bar.py"]
+    assert sorted(t["test_files_changed"]) == ["qux_test.go", "tests/test_foo.py", "web/baz.test.ts"]
+
+
+def test_is_test_file():
+    for p in ("test_a.py", "a_test.py", "a_test.go", "a.test.js", "a.spec.ts", "x/tests/a.py",
+              "x/__tests__/a.js", "spec/a.rb"):
+        assert collect.is_test_file(p), p
+    assert not collect.is_test_file("src/a.py")
+
+
+def test_project_test_command_and_claude_md_mention(repo):
+    (repo / "package.json").write_text('{"scripts": {"test": "jest"}}')
+    (repo / "CLAUDE.md").write_text("Run `npm test` before commit\n")
+    (repo / "AGENTS.md").write_text("nothing here\n")
+    p = collect.project_facts(str(repo))
+    assert p["test_command"] == "npm test" and p["source"] == "package.json"
+    assert p["instructions"] == [{"file": "CLAUDE.md", "mentions_test_command": True},
+                                 {"file": "AGENTS.md", "mentions_test_command": False}]
+
+
+@pytest.mark.parametrize("files,cmd", [
+    ({"Makefile": "build:\n\tx\ntest:\n\tpytest\n"}, "make test"),
+    ({"justfile": "test:\n  pytest\n"}, "just test"),
+    ({"pytest.ini": "[pytest]\n"}, "pytest"),
+    ({"pyproject.toml": "[tool.pytest.ini_options]\n"}, "pytest"),
+    ({"go.mod": "module x\n"}, "go test ./..."),
+    ({"Cargo.toml": "[package]\n"}, "cargo test"),
+    ({}, "unknown"),
+])
+def test_project_test_command_sources(repo, files, cmd):
+    for n, t in files.items():
+        (repo / n).write_text(t)
+    assert collect.project_facts(str(repo))["test_command"] == cmd
+
+
+def test_project_go_mention_accepts_prefix(repo):
+    (repo / "go.mod").write_text("module x\n")
+    (repo / "CLAUDE.md").write_text("use go test with -race\n")
+    assert collect.project_facts(str(repo))["instructions"][0]["mentions_test_command"] is True
+
+
+def test_previous_recap_carry_over(repo):
+    assert collect.previous_recap(str(repo)) is None
+    d = repo / ".claude" / "recaps"
+    d.mkdir(parents=True)
+    (d / "2026-10-01-old.md").write_text("## Next time\n- old\n")
+    (d / "2026-10-19-new.md").write_text(
+        "# R\n## Next time\n- run tests\n* check CI\n1. third\n\n## Other\n- not me\n")
+    p = collect.previous_recap(str(repo))
+    assert p == {"file": "2026-10-19-new.md", "next_time": ["run tests", "check CI", "third"]}
+
+
+def test_previous_recap_caps(repo):
+    d = repo / ".claude" / "recaps"
+    d.mkdir(parents=True)
+    (d / "a.md").write_text("## Next time\n" + "".join("- %s\n" % ("x" * 400)
+                                                       for _ in range(15)))
+    nt = collect.previous_recap(str(repo))["next_time"]
+    assert len(nt) == 10 and all(len(b) == 300 for b in nt)
+
+
+def test_valid_json_everywhere(tmp_path, repo, home, hook_env):
+    runs = [(tmp_path, ()), (repo, ("--bogus",)), (repo, ()), (repo, ("--since", "nonsense")),
+            (repo, ("--base", "nope")), (repo, ("--save",))]
+    commit(repo, {"a.py": "1\n"}, "first")
+    for cwd, args in runs:
+        r = subprocess.run([sys.executable, str(COLLECT), *args], cwd=cwd, env=hook_env,
+                           capture_output=True, text=True)
+        assert r.returncode == 0
+        assert isinstance(json.loads(r.stdout)["ok"], bool)
+    out = run_collect(repo, env=hook_env)
+    assert {"tests", "efficiency", "project", "previous_recap"} <= set(out)
+
+
+def test_suggested_only_for_known_runners(repo):
+    def runs(cmds, files):
+        rows = [row("09:0%d:00" % i, "post", command=c, kind="test", id=str(i), exit=0)
+                for i, c in enumerate(cmds)]
+        return {r["command"]: r["suggested"]
+                for r in collect.efficiency(rows, files, str(repo))["full_suite_runs"]}
+    files = py_files("tests/test_a.py", "web/a.test.ts", "pkg/x/a_test.go", "b_test.go")
+    got = runs(["npm run test", "make test", "yarn test", "python -m pytest", "npx jest",
+                "go test ./...", ""], files)
+    assert "" not in got and "   " not in runs(["   "], files)
+    assert got["npm run test"] is None and got["make test"] is None and got["yarn test"] is None
+    assert got["python -m pytest"] == "python -m pytest tests/test_a.py"
+    assert got["npx jest"] == "npx jest web/a.test.ts"
+    assert got["go test ./..."] == "go test ./... ./pkg/x/..."
