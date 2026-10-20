@@ -19,16 +19,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # Every Python on Linux. macOS and Windows minutes cost more, so they get only the
-      # oldest and newest supported Python, which is where version differences show up.
-      matrix:
-        os: [ubuntu-latest]
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
-        include:
-          - {os: macos-latest, python: "3.9"}
-          - {os: macos-latest, python: "3.15"}
-          - {os: windows-latest, python: "3.9"}
-          - {os: windows-latest, python: "3.15"}
+      # Pull requests: every Python on Linux; macOS and Windows minutes cost more, so they get
+      # only the oldest and newest Python, where version differences show up.
+      # Push to main (after a PR passed): a 3-job smoke check of the merged result.
+      matrix: ${{ fromJSON(github.event_name == 'pull_request' && '{"os":["ubuntu-latest"],"python":["3.9","3.10","3.11","3.12","3.13","3.14","3.15"],"include":[{"os":"macos-latest","python":"3.9"},{"os":"macos-latest","python":"3.15"},{"os":"windows-latest","python":"3.9"},{"os":"windows-latest","python":"3.15"}]}' || '{"include":[{"os":"ubuntu-latest","python":"3.9"},{"os":"ubuntu-latest","python":"3.15"},{"os":"windows-latest","python":"3.15"}]}') }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
