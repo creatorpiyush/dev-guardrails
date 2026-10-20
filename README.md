@@ -530,7 +530,7 @@ Writes a short recap when you finish a piece of work: what changed, what it may 
 | `--base <branch>` | Base branch for the merge-base fallback. Defaults to `baseBranch` |
 | `--save` | Offer to save the recap. Nothing is written until you say yes |
 
-You can also ask "recap this session" and the skill picks it up. The recap has four sections and stays near `maxWords` words (350 at most):
+You can also ask "recap this session" and the skill picks it up. The recap has four sections and targets 150 to 250 words, and never exceeds 350 unless you ask for detail:
 
 - **What changed**: 2 to 4 bullets, outcome first.
 - **Impact**: 2 to 4 bullets with a low, medium, or high rating, file evidence, and a label for each: *observed* (the diff shows it) or *inferred* (a judgment).
@@ -592,7 +592,7 @@ Optional `.claude/session-recap.json` at the repo root:
 | :- | :- | :- |
 | `baseBranch` | `"main"` | Branch used for the merge-base fallback |
 | `retentionDays` | `14` | Days to keep this repo's logs (1 to 365) |
-| `maxWords` | `250` | Target length of the recap (50 to 1000) |
+| `maxWords` | `250` | Target ceiling (50 to 1000); the recap never exceeds 350 words unless you ask for detail |
 | `autoRecap` | `false` | Turn on the Stop nudge |
 | `testCommandKinds` | `["pytest", "jest", "go test"]` | Runners whose commands count as tests |
 

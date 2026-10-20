@@ -32,7 +32,7 @@ Before writing, run `git diff <since.commit> -- <file>` for the three highest-im
 
 ## 3. Write the recap
 
-Four sections, in this order, with these headings. The whole recap stays under `config.maxWords` words. If the user asks for detail, go to 350 at most.
+Four sections, in this order, with these headings. Target 150-250 words, short enough to read in under a minute. If `config.maxWords` is below 250, it becomes the ceiling. Never exceed 350 words, whatever `maxWords` says, unless the user explicitly asks for detail.
 
 - **What changed**: 2-4 bullets, outcome first ("Added retry to the payment client"), grouped by purpose, not by file.
 - **Impact**: 2-4 bullets. Each has a risk rating (low, medium, high) with the reason, who or what is affected (callers, data, deploys, dependencies), rollback difficulty, and file evidence from `impact`. Label each bullet *observed* (the diff or an `impact` item shows it) or *inferred* (your judgment).
