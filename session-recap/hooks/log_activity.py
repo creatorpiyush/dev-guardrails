@@ -27,6 +27,7 @@ COLLECT_DIR = os.path.join(HERE, "..", "scripts")
 
 DEFAULT_RETENTION_DAYS = 14  # other repos' logs always use this; also the import fallback
 COMMAND_CAP = 500
+RETENTION_MARKER = "retention"
 DEFAULT_TEST_KINDS = ["pytest", "jest", "go test"]
 SHELL_TOOLS = {"Bash", "PowerShell"}
 EXIT_CODE = re.compile(r"Exit code (\d+)")
@@ -178,25 +179,36 @@ KEY_BLOCK = re.compile(
     re.S)
 
 
+# Local rules below (not copied). A value is "double quoted", 'single quoted', or one word.
+VALUE = r"(\"[^\"]*\"|'[^']*'|[^\s\"']+)"
+NOT_VAR = r"(?![\"']?[$<])"  # $VAR, ${VAR}, <placeholder> stay
 AUTH_HEADER = re.compile(r"(?i)(authorization:\s*(?:bearer|basic|token)?\s*)\S+")
 PASSWORD_FLAG = re.compile(
-    r"(?i)(--?(?:password|passwd|passphrase|pass|token|secret|api[-_]?key)(?:=|\s+))(?![$<])\S+")
-USER_FLAG = re.compile(r"(?i)((?:^|\s)(?:-u|--user)(?:=|\s+)[^\s:$<]+:)(?![$<])[^\s'\"]+")
+    r"(?i)(--?(?:password|passwd|passphrase|pass|token|secret|api[-_]?key)(?:=|\s+))"
+    + NOT_VAR + VALUE)
+USER_FLAG = re.compile(r"(?i)((?:^|\s)(?:-u|--user)(?:=|\s+)[^\s:$<]+:)" + NOT_VAR + VALUE)
 KEY_HEADER = re.compile(
-    r"(?i)((?:x-)?(?:api[-_]?key|auth[-_]?token|access[-_]?token)\s*:\s*)(?![$<])[^\s'\"]+")
+    r"(?i)((?:x-)?(?:api[-_]?key|auth[-_]?token|access[-_]?token)\s*:\s*)" + NOT_VAR + VALUE)
+# a secret-looking NAME in the name: GITHUB_TOKEN, DB_PASSWORD, OPENAI_KEY, aws_secret_access_key
+SENSITIVE = (r"[\w.-]*(?:secret|token|passw(?:or)?d|pass|api[-_]?key|auth(?!orization\b)"
+             r"|credential|private[-_]?key|[-_]key)[\w.-]*")
+ASSIGNMENT = re.compile(r"(?i)(?<![\w.-])(" + SENSITIVE + r"(?:=|:[ \t])[ \t]*)" + NOT_VAR + VALUE)
+CONFIG_SET = re.compile(r"(?i)(\bconfigure\s+set\s+" + SENSITIVE + r"\s+)" + NOT_VAR + VALUE)
 
 
 def redact(command):
-    """Replace secrets in a raw command string; ${VAR} and <placeholder> stay."""
+    """Replace secrets in a raw command string; ${VAR} and <placeholder> stay.
+
+    Pattern-based: it can miss a secret in a shape no rule knows."""
     command = KEY_BLOCK.sub("<redacted:private-key>", command)
     for name, rx in SECRET_RULES:
         command = rx.sub("<redacted:%s>" % name, command)
     for _name, rx, repl in EXTRA_REDACTIONS:
         command = rx.sub(repl, command)
     command = AUTH_HEADER.sub(r"\1<redacted>", command)
-    command = KEY_HEADER.sub(r"\1<redacted>", command)
-    command = USER_FLAG.sub(r"\1<redacted>", command)
-    return PASSWORD_FLAG.sub(r"\1<redacted>", command)
+    for rx in (KEY_HEADER, USER_FLAG, PASSWORD_FLAG, ASSIGNMENT, CONFIG_SET):
+        command = rx.sub(r"\1<redacted>", command)
+    return command
 
 
 # -- classification ----------------------------------------------------------
@@ -211,8 +223,9 @@ def _rules(*rows):
 KIND_RULES = [
     ("test", tuple(_rules(
         "pytest", "py.test", "tox", "nox", "jest", "vitest", "mocha", "go test",
-        "cargo test", "npm test", "npm run test", "yarn test", "pnpm test", "bun test",
-        "rspec", "phpunit", "dotnet test", "make test", "unittest"))),
+        "cargo test", "npm test", "npm run test", "yarn test", "yarn run test",
+        "pnpm test", "pnpm run test", "bun test", "rspec", "bundle exec rspec",
+        "bundle exec rake test", "phpunit", "dotnet test", "make test", "unittest"))),
     ("typecheck", tuple(_rules(
         "mypy", "pyright", "tsc", "npm run typecheck", "npm run type-check"))),
     ("lint", tuple(_rules(
@@ -246,6 +259,10 @@ def _normalize(argv):
             argv = argv[2:]
         else:
             break
+    if argv and argv[0] in ("npm", "pnpm", "yarn", "bun"):  # test:unit, test:e2e are tests
+        i = 2 if argv[1:2] == ["run"] else 1
+        if len(argv) > i and argv[i].startswith("test:"):
+            argv[i] = "test"
     return argv
 
 
@@ -267,7 +284,7 @@ def _kinds(command, rules, depth=0):
         for kind, prefixes in rules:
             if any(tuple(argv[:len(p)]) == p for p in prefixes):
                 integ = kind == "test" and any(
-                    "integration" in a or "e2e" in a for a in argv[1:])
+                    "integration" in a or "e2e" in a for a in seg[1:])
                 yield kind, integ
 
 
@@ -410,15 +427,32 @@ def read_rows(f):
 
 # -- retention ---------------------------------------------------------------
 
-def prune(base, days, now, own=None, own_days=None):
-    """Delete *.jsonl older than `days` under base/*/, then empty hash dirs.
+def dir_days(d, default):
+    """Retention in days for a hash dir: its `retention` marker (1..365), else `default`."""
+    try:
+        n = int((Path(d) / RETENTION_MARKER).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return default
+    return max(1, min(365, n))
 
-    The `own` hash dir (this repo's) uses `own_days` instead, so a repo's
-    checked-in retentionDays can never shorten another repo's retention."""
+
+def write_private(path, text, flags):
+    fd = os.open(str(path), flags | os.O_CREAT | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def prune(base, days, now, own=None, own_days=None):
+    """Delete *.jsonl older than the dir's limit under base/*/, then empty hash dirs.
+
+    Each dir's limit is its `retention` marker (written by the hook working in that
+    repo), else `days`. The `own` dir (this repo's) uses `own_days` from the live
+    config, so a repo's checked-in retentionDays only ever affects its own dir."""
     for d in Path(base).iterdir():
         if not d.is_dir():
             continue
-        cutoff = now - (own_days if own_days is not None and d == own else days) * 86400
+        limit = own_days if own_days is not None and d == own else dir_days(d, days)
+        cutoff = now - limit * 86400
         for f in d.glob("*.jsonl"):
             try:
                 if f.stat().st_mtime < cutoff:
@@ -426,6 +460,8 @@ def prune(base, days, now, own=None, own_days=None):
             except OSError:
                 pass
         try:
+            if not any(d.glob("*.jsonl")):
+                (d / RETENTION_MARKER).unlink(missing_ok=True)
             d.rmdir()  # fails unless empty
         except OSError:
             pass
@@ -468,9 +504,11 @@ def main():
             row = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                    "event": "recap_suggested"}
     if row:
-        d.mkdir(parents=True, exist_ok=True)
-        with open(logfile, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, separators=(",", ":")) + "\n")
+        d.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        d.mkdir(mode=0o700, exist_ok=True)
+        write_private(logfile, json.dumps(row, separators=(",", ":")) + "\n", os.O_APPEND)
+        if dir_days(d, None) != days:  # let other repos' hooks honor this repo's setting
+            write_private(d / RETENTION_MARKER, "%d\n" % days, os.O_TRUNC)
     if msg:
         print(json.dumps({"systemMessage": msg}))
     prune(home / ".claude" / "session-recap", DEFAULT_RETENTION_DAYS, time.time(),

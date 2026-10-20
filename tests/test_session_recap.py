@@ -306,6 +306,71 @@ def test_repo_retention_only_shortens_its_own_logs(repo, home, hook_env):
     assert not mine.exists() and theirs.exists()
 
 
+def test_other_repos_marker_extends_retention(repo, home, hook_env):
+    other = home / ".claude" / "session-recap" / "otherhash"
+    other.mkdir(parents=True)
+    (other / "retention").write_text("30")
+    f = other / "mid.jsonl"
+    f.write_text("{}\n")
+    os.utime(f, (time.time() - 20 * 86400,) * 2)
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert f.exists()
+    os.utime(f, (time.time() - 31 * 86400,) * 2)
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert not f.exists()
+
+
+@pytest.mark.parametrize("marker", [None, "garbage", "", "1.5"])
+def test_missing_or_invalid_marker_means_14_days(repo, home, hook_env, marker):
+    other = home / ".claude" / "session-recap" / "otherhash"
+    other.mkdir(parents=True)
+    if marker is not None:
+        (other / "retention").write_text(marker)
+    f = other / "old.jsonl"
+    f.write_text("{}\n")
+    os.utime(f, (time.time() - 15 * 86400,) * 2)
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert not f.exists()
+
+
+def test_marker_is_clamped(tmp_path):
+    d = tmp_path / "h"
+    d.mkdir()
+    (d / "retention").write_text("99999")
+    assert log_activity.dir_days(d, 14) == 365
+    (d / "retention").write_text("0")
+    assert log_activity.dir_days(d, 14) == 1
+
+
+def test_hook_writes_own_retention_marker_when_changed(repo, home, hook_env):
+    write_config(repo, '{"retentionDays": 30}')
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    own = log_activity.log_dir(home, str(repo.resolve()))
+    marker = own / "retention"
+    assert marker.read_text().strip() == "30"
+    mtime = marker.stat().st_mtime_ns
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert marker.stat().st_mtime_ns == mtime
+    write_config(repo, '{"retentionDays": 7}')
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    assert marker.read_text().strip() == "7"
+
+
+posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
+
+
+@posix_only
+def test_log_dirs_and_files_are_private(repo, home, hook_env):
+    hook_env["UMASK_TEST"] = "1"
+    run_hook(post(repo, "Bash", {"command": "ls"}), hook_env)
+    base = home / ".claude" / "session-recap"
+    own = log_activity.log_dir(home, str(repo.resolve()))
+    for d in (base, own):
+        assert d.stat().st_mode & 0o777 == 0o700, d
+    for f in own.iterdir():
+        assert f.stat().st_mode & 0o777 == 0o600, f
+
+
 # -- classify / redact ---------------------------------------------------------
 
 import random
@@ -347,6 +412,15 @@ DEFAULT_TESTS = ["pytest", "jest", "go test"]
     ("node_modules/.bin/jest", "test", False),
     ("/opt/homebrew/bin/ruff check", "lint", False),
     ("C:/Python/python.exe -m pytest", "test", False),
+    ("npm run test:unit", "test", False),
+    ("npm run test", "test", False),
+    ("pnpm run test", "test", False),
+    ("pnpm test:unit", "test", False),
+    ("yarn run test", "test", False),
+    ("yarn test:unit", "test", False),
+    ("bundle exec rspec", "test", False),
+    ("bundle exec rake test", "test", False),
+    ("npm run test:e2e", "test", True),
 ])
 def test_classify_kinds(command, kind, integration):
     assert log_activity.classify(command, DEFAULT_TESTS) == (kind, integration)
@@ -399,6 +473,39 @@ def test_redacts_user_flag_and_key_headers():
     assert "alice:" in log_activity.redact("curl -u alice:s3cr3t x")
     for cmd in ["curl -u $USER:$PASS x", "curl -u alice https://x", "curl -u alice:$PW x"]:
         assert log_activity.redact(cmd) == cmd
+
+
+@pytest.mark.parametrize("cmd,secret", [
+    ("GITHUB_TOKEN=abcd1234efgh5678 gh api /user", "abcd1234efgh5678"),
+    ("export OPENAI_KEY=myrealsecretvalue123", "myrealsecretvalue123"),
+    ("cat > .env <<EOF\nDB_PASSWORD=hunter2hunter2\nAPI_TOKEN=zzzzqqqq\nEOF", "hunter2hunter2"),
+    ("cat > .env <<EOF\nDB_PASSWORD=hunter2hunter2\nAPI_TOKEN=zzzzqqqq\nEOF", "zzzzqqqq"),
+    ('echo "password: hunter2"', "hunter2"),
+    ("aws configure set aws_secret_access_key wJalrXUtnFEMIexample", "wJalrXUtnFEMIexample"),
+    ('curl -u admin:"my pass" https://x', "my pass"),
+    ('curl -u admin:"my pass" https://x', "pass\""),
+    ('login --password "two words"', "words"),
+    ("login --password 'two words'", "words"),
+    ("export DB_PASSWORD='a b c'", "a b c"),
+])
+def test_redacts_env_assignments_and_quoted_values(cmd, secret):
+    assert secret not in log_activity.redact(cmd), cmd
+
+
+def test_env_assignment_redaction_keeps_names_and_neighbours():
+    out = log_activity.redact("GITHUB_TOKEN=abcd1234efgh5678 gh api /user")
+    assert out.startswith("GITHUB_TOKEN=") and out.endswith("gh api /user")
+    out = log_activity.redact('curl -u admin:"my pass" https://x')
+    assert "admin:" in out and out.endswith("https://x")
+
+
+@pytest.mark.parametrize("cmd", [
+    "FOO=bar make", "export PATH=$PATH:/x", "login --password=$PW", "curl -u alice https://x",
+    "export API_TOKEN=$TOKEN", 'export API_TOKEN="${TOKEN}"', "export K_TOKEN=<your-token>",
+    "ls -la",
+])
+def test_redaction_leaves_safe_commands_unchanged(cmd):
+    assert log_activity.redact(cmd) == cmd
 
 
 # -- change facts ------------------------------------------------------------
@@ -677,6 +784,26 @@ def test_signal_deleted_file(repo):
     assert [i["file"] for i in sig(impact(repo, base), "deleted")] == ["gone.py"]
 
 
+def test_test_files_get_no_api_or_signature_signals(repo):
+    base = commit(repo, {"tests/test_a.py": "def test_old(a):\n    pass\n"}, "b")
+    (repo / "tests" / "test_a.py").write_text(
+        "def test_old(a, b):\n    pass\n\ndef test_new():\n    pass\n")
+    (repo / "tests" / "helper.py").write_text("def helper():\n    pass\n")
+    items = impact(repo, base)
+    assert not sig(items, "public-api") and not sig(items, "signature")
+
+
+def test_impact_items_capped_per_file_per_signal(repo):
+    base = commit(repo, {"a.txt": "1\n"}, "b")
+    (repo / "big.py").write_text("".join("def f%02d():\n    pass\n" % i for i in range(25)))
+    items = [i for i in impact(repo, base) if i["file"] == "big.py"]
+    api = sig(items, "public-api")
+    assert len(api) == 11
+    assert api[-1] == {"signal": "public-api", "file": "big.py",
+                       "evidence": "15 more not shown", "truncated": 15}
+    assert len([i for i in api if "truncated" not in i]) == 10
+
+
 def test_signal_env_var_names_only(repo):
     base = commit(repo, {"a.txt": "1\n"}, "b")
     (repo / "app.py").write_text(
@@ -887,6 +1014,31 @@ def test_no_result_inferred_for_pre_without_post():
     assert [i["command"] for i in e["no_result"]["items"]] == ["rm x"]
     assert len(e["denied"]) == 1
     assert e["installs"] == ["pip install x"]
+
+
+def test_own_collector_call_is_not_no_result():
+    rows = [row("09:00:00", "pre", id="1",
+                command='python3 "/p/session-recap/scripts/collect_recap.py" --session s1'),
+            row("09:00:01", "pre", id="2", command="rm x")]
+    e = collect.efficiency(rows, [])
+    assert [i["command"] for i in e["no_result"]["items"]] == ["rm x"]
+
+
+def test_efficiency_lists_capped_with_truncated_counts():
+    rows = []
+    for i in range(30):
+        rows.append(row("09:00:00", "pre", id="p%d" % i, command="rm %d" % i))
+        rows.append(row("09:00:01", "post", id="i%d" % i, command="pip install p%d" % i,
+                        kind="install", exit=0))
+        rows.append(row("09:00:02", "denied", reason="no %d" % i))
+        for _ in range(3):
+            rows.append(row("09:00:03", "post", id="e", path="f%d.py" % i, edits=1, tool="Edit"))
+    e = collect.efficiency(rows, [])
+    assert len(e["installs"]) == len(e["denied"]) == len(e["no_result"]["items"]) == 20
+    assert len(e["files_edited_3plus"]) == 20
+    assert e["truncated"] == {"installs": 10, "denied": 10, "no_result": 10,
+                              "files_edited_3plus": 10}
+    assert "truncated" not in collect.efficiency([row("09:00:00", "pre", id="1")], [])
 
 
 def test_longest_commands_top_five():

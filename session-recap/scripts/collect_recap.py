@@ -419,7 +419,7 @@ def toml_dep_pair(root, since, f, warnings):
 def content_signals(path, add, rem, toml_pair=None):
     """Yield (signal, evidence) from changed lines; evidence is derived facts only."""
     lang = lang_of(path)
-    if lang:
+    if lang and not is_test_file(path):  # a test's functions are not an API
         a, r = api_names(lang, add), api_names(lang, rem)
         for n in sorted(set(a) - set(r)):
             yield "public-api", "+" + n
@@ -553,8 +553,9 @@ def impact_signals(root, since, files, warnings=None):
             if f["status"] == "deleted":
                 items.append({"signal": "deleted", "file": path, "evidence": "file removed"})
             continue
+        mine = []
         for sig_, ev in path_signals(path, f["status"]):
-            items.append({"signal": sig_, "file": path, "evidence": ev})
+            mine.append({"signal": sig_, "file": path, "evidence": ev})
         if f["status"] != "deleted" and not f.get("binary") and not f.get("too_large") \
                 and not matches(path, LOCKFILES):
             lines = diff_lines(root, since, f, warnings)
@@ -562,14 +563,33 @@ def impact_signals(root, since, files, warnings=None):
                 pair = (toml_dep_pair(root, since, f, warnings)
                         if posixpath.basename(path) in TOML_MANIFESTS else None)
                 for sig_, ev in content_signals(path, *lines, toml_pair=pair):
-                    items.append({"signal": sig_, "file": path, "evidence": ev})
+                    mine.append({"signal": sig_, "file": path, "evidence": ev})
         found, cut = importers(root, f, changed)
         for ip in found:
             item = {"signal": "importer", "file": path, "evidence": ip}
             if cut:
                 item["truncated"] = True
-            items.append(item)
+            mine.append(item)
+        items += cap_per_signal(mine, path)
     return items
+
+
+SIGNAL_CAP = 10  # items per file per signal
+
+
+def cap_per_signal(items, path):
+    """Keep the first SIGNAL_CAP items of each signal; add one summary item per cut signal."""
+    kept, seen, cut = [], {}, {}
+    for i in items:
+        n = seen[i["signal"]] = seen.get(i["signal"], 0) + 1
+        if n <= SIGNAL_CAP or i["signal"] == "importer":  # importers: own cap of 20
+            kept.append(i)
+        else:
+            cut[i["signal"]] = cut.get(i["signal"], 0) + 1
+    for sig_, n in cut.items():
+        kept.append({"signal": sig_, "file": path, "evidence": "%d more not shown" % n,
+                     "truncated": n})
+    return kept
 
 
 # -- test facts, efficiency, project facts, previous recap -------------------
@@ -577,6 +597,7 @@ def impact_signals(root, since, files, warnings=None):
 TEST_DIRS = {"tests", "test", "__tests__", "spec"}
 TEST_STEM = re.compile(r"^test_|_test$|\.test$|\.spec$")
 RUN_EVENTS = ("post", "fail")
+LIST_CAP = 20  # efficiency lists; the cut count goes in efficiency.truncated
 KIND_NAMES = ("test", "lint", "typecheck", "build")
 RUNNER_PREFIXES = (("npx",), ("uv", "run"), ("poetry", "run"))
 
@@ -707,23 +728,35 @@ def efficiency(rows, files, root=None):
             fails[r["command"]] = fails.get(r["command"], 0) + 1
     done = {r.get("id") for r in rows if r.get("event") in RUN_EVENTS}
     no_result = [{k: r[k] for k in ("tool", "command", "path", "ts") if k in r}
-                 for r in rows if r.get("event") == "pre" and r.get("id") not in done]
+                 for r in rows if r.get("event") == "pre" and r.get("id") not in done
+                 and "collect_recap.py" not in str(r.get("command", ""))]  # our own call
     test_paths = [f["path"] for f in files if is_test_file(f["path"])]
     full = []
     for r in runs_of(rows, ("test",)):
         if is_full_suite(r["command"], root):
             full.append({"command": r["command"], "ts": r.get("ts"),
                          "suggested": suggest_targeted(r["command"], test_paths)})
-    return {
-        "active_span_s": span, "longest_commands": longest,
+    lists = {
         "files_edited_3plus": [{"path": p, "edits": n} for p, n in edits.items() if n >= 3],
-        "repeated_failures": [{"command": c, "failures": n} for c, n in fails.items() if n >= 2],
-        "no_result": {"label": "blocked, denied, or interrupted (inferred)", "items": no_result},
+        "no_result": no_result,
         "denied": [r for r in rows if r.get("event") == "denied"],
         "installs": [r["command"] for r in rows if r.get("event") in RUN_EVENTS
                      and r.get("kind") == "install" and isinstance(r.get("command"), str)],
+    }
+    truncated = {k: len(v) - LIST_CAP for k, v in lists.items() if len(v) > LIST_CAP}
+    lists = {k: v[:LIST_CAP] for k, v in lists.items()}
+    out = {
+        "active_span_s": span, "longest_commands": longest,
+        "files_edited_3plus": lists["files_edited_3plus"],
+        "repeated_failures": [{"command": c, "failures": n} for c, n in fails.items() if n >= 2],
+        "no_result": {"label": "blocked, denied, or interrupted (inferred)",
+                      "items": lists["no_result"]},
+        "denied": lists["denied"], "installs": lists["installs"],
         "full_suite_runs": full,
     }
+    if truncated:
+        out["truncated"] = truncated  # {list name: how many were cut}
+    return out
 
 
 def read_text(root, name):
