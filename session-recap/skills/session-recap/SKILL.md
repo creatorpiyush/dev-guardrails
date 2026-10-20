@@ -2,7 +2,7 @@
 name: session-recap
 description: Recap a work session from git and the local activity log. Use when the user asks to recap or summarize this session, or asks what we changed, what it affects, or what was tested. Writes a short What changed, Impact, Testing, Next time summary and saves it only if the user says yes.
 argument-hint: "[--since <ref|time>] [--base <branch>] [--save]"
-allowed-tools: Read, Bash(git diff *), Bash(git show *), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/collect_recap.py" *), Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/collect_recap.py" *)
+allowed-tools: Read, Bash(git diff *), Bash(git show *), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/collect_recap.py"), Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/collect_recap.py"), Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/collect_recap.py" *), Bash(python "${CLAUDE_PLUGIN_ROOT}/scripts/collect_recap.py" *)
 ---
 
 # Write an honest session recap
@@ -19,7 +19,7 @@ Facts come from git and the activity log. Impact is your judgment, and you say s
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/collect_recap.py" [--since <ref|time>] [--base <branch>] [--session <id>] [--save]
 ```
 
-Pass the arguments you were given. If `python3` is missing, use `python`. It prints one JSON object.
+Pass the arguments you were given. When you were invoked directly (no `--session` given), add `--session ${CLAUDE_SESSION_ID}`. If `python3` is missing, use `python`. It prints one JSON object.
 
 - `ok: false`: explain `error.code` (`not-a-repo`, `bad-arguments`, `base-not-found`, `since-not-found`, `internal-error`) and `error.message` in plain words, and stop.
 - Show any `warnings`, such as an invalid `.claude/session-recap.json` being ignored.

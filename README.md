@@ -537,7 +537,7 @@ You can also ask "recap this session" and the skill picks it up. The recap has f
 - **Testing**: the commands that ran, how often, and how they ended, plus new tests and what isn't covered. With no log it says "no test run recorded". It warns when tests ran before the last edit.
 - **Next time**: 2 to 4 actions, each tied to a logged signal, such as a file edited three or more times, a full-suite run where a targeted command existed, or a repeated failing command. If an earlier recap was saved, one line says which of its items look adopted.
 
-The script reports these impact signals, each with the file that caused it: `public-api`, `signature`, `dependency`, `env-var`, `config`, `migration`, `lockfile`, `ci`, `infra`, `auth`, `deleted`, and `importer` (modules that import a changed file, one hop). Claude offers a `CLAUDE.md` line and, with `--save`, a file at `.claude/recaps/YYYY-MM-DD-slug.md`. Both are written only after you say yes, with the normal edit tools, so a protected branch still blocks `--save` through git-workflow-guard. It never commits, pushes, or posts.
+The script reports these impact signals, each with the file that caused it: `public-api`, `signature`, `dependency`, `env-var`, `config`, `migration`, `lockfile`, `ci`, `infra`, `auth`, `deleted`, and `importer` (modules that import a changed file, one hop). `public-api` and `signature` are not reported for test files. Each file reports at most 10 items per signal; a cut signal gets one extra item with `evidence` "N more not shown" and `truncated: N`. The efficiency lists (`installs`, `denied`, `no_result.items`, `files_edited_3plus`) keep 20 entries each, and `efficiency.truncated` says how many were dropped. Claude offers a `CLAUDE.md` line and, with `--save`, a file at `.claude/recaps/YYYY-MM-DD-slug.md`. Both are written only after you say yes, with the normal edit tools, so a protected branch still blocks `--save` through git-workflow-guard. It never commits, pushes, or posts.
 
 ### What is stored, and where
 
@@ -559,13 +559,17 @@ One file per session: `~/.claude/session-recap/<sha256 of the repo's real path, 
 | `interrupted` | `true` when the call was interrupted |
 | `reason` | `denied` only: the denial reason, redacted |
 
-It never stores file contents, command output, `tool_response` bodies, or environment variable values. Commands are redacted before they are written: known provider token shapes, URL credentials, `Authorization` headers, and `--password`-style flags. Redaction is pattern-based and can miss a secret in an unusual shape, so keep secrets out of command lines.
+It never stores file contents, command output, or `tool_response` bodies. Commands are redacted before they are written, and the log keeps the redacted text only. What is redacted: known provider token shapes, URL credentials, `Authorization` and `X-Api-Key`-style headers, `-u user:pass`, `--password`-style flags (including quoted values), and the value of `NAME=value`, `export NAME=value`, and `NAME: value` when the name contains `secret`, `token`, `password`, `pass`, `api key`, `auth`, `credential`, `private key`, or ends in `_key`. `$VAR`, `${VAR}`, and `<placeholder>` values are kept. Redaction is pattern-based and can miss a secret in an unusual shape, so keep secrets out of command lines.
 
-Logs older than 14 days are deleted on write. For the repo you are working in, `retentionDays` sets the limit. Other repos' logs always use 14 days, so one repo's config can't shorten another's. Delete `~/.claude/session-recap/` any time to clear everything.
+The log directory is created with mode 0700 and log files with 0600 (POSIX), so other local users can't read them.
+
+Logs older than the retention limit are deleted on write. Each repo's limit is its `retentionDays` (default 14). The hook records it in a small `retention` file in that repo's log directory, so the limit also holds while you work in other repos. A repo's config can only change its own directory's limit; a missing or invalid `retention` file means 14 days. Delete `~/.claude/session-recap/` any time to clear everything.
 
 ### What the log can't see
 
 - **Exit codes.** Claude Code gives a successful call no exit-code field, so a success is logged as exit 0. Failures come from the `PostToolUseFailure` event, which carries `Exit code N`.
+- **Earlier sessions.** Logs are per session. Running `/session-recap:summary` in a new session (for example after a restart) finds no log for that session and reports "no test run recorded". Pass `--session <id>` to recap an earlier session's log; the ids are the log file names (`~/.claude/session-recap/<repo hash>/<session id>.jsonl`).
+- **Changes from before the session.** The base is diffed against the working tree, so uncommitted changes that existed before the session started are counted too.
 - **Blocked calls.** No event tells a hook that another plugin blocked or asked about a call. The hook logs each call before it runs (`pre`). A `pre` with no matching result is reported as "no result (blocked, denied, or interrupted, inferred)".
 - **Prompts you approved.** A call that asked and was then allowed looks the same as any other. It can't be detected.
 - **Auto-mode denials.** `PermissionDenied` fires only when the auto-mode classifier denies a call, so those are the only `denied` events.
