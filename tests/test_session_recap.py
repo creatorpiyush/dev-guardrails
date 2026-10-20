@@ -749,3 +749,60 @@ def test_failed_file_diff_warns_not_fails(repo, monkeypatch):
     items = collect.impact_signals(str(repo), base,
                                    [{"path": "a.py", "status": "modified"}], warnings)
     assert not sig(items, "public-api") and any("a.py" in w for w in warnings)
+
+
+def test_go_importer_matches_whole_path_segment(repo):
+    base = commit(repo, {
+        "go.mod": "module x\n", "auth/a.go": "package auth\n",
+        "m/real.go": 'package m\nimport "github.com/o/x/auth"\n',
+        "m/near.go": 'package m\nimport "github.com/o/oauth"\n',
+        "m/near2.go": 'package m\nimport "github.com/o/myauth"\n',
+    }, "b")
+    (repo / "auth" / "a.go").write_text("package auth\nfunc Login() {}\n")
+    imp = sig(impact(repo, base), "importer")
+    assert [i["evidence"] for i in imp] == ["m/real.go"]
+
+
+def test_deleted_secret_file_keeps_deleted_signal(repo):
+    base = commit(repo, {".env": "A=S3NTINEL\n"}, "b")
+    (repo / ".env").unlink()
+    out = run_collect(repo, "--since", base)
+    assert {(i["signal"], i["file"]) for i in out["impact"]} == {
+        ("config", ".env"), ("deleted", ".env")}
+    assert "S3NTINEL" not in json.dumps(out)
+
+
+def test_toml_dependencies_only_in_dependency_sections(repo):
+    base = commit(repo, {"pyproject.toml": (
+        '[tool.myapp]\ntoken = "old1"\n\n[tool.poetry.dependencies]\nrequests = "^2.30"\n'
+        '\n[project]\nname = "p"\ndependencies = [\n  "flask>=2.0",\n]\n')}, "b")
+    (repo / "pyproject.toml").write_text(
+        '[tool.myapp]\ntoken = "9S3NTINEL"\n\n[tool.poetry.dependencies]\nrequests = "^2.31"\n'
+        '\n[project]\nname = "q"\ndependencies = [\n  "flask>=2.1",\n]\n')
+    out = run_collect(repo, "--since", base)
+    ev = {i["evidence"] for i in sig(out["impact"], "dependency")}
+    assert ev == {"requests ^2.30→^2.31", "flask 2.0→2.1"}
+    assert "S3NTINEL" not in json.dumps(out)
+
+
+def test_toml_change_outside_dependency_sections_is_generic(repo):
+    base = commit(repo, {"Cargo.toml": '[package]\nname = "a"\n[dependencies]\nserde = "1"\n'}, "b")
+    (repo / "Cargo.toml").write_text('[package]\nname = "b"\n[dependencies]\nserde = "1"\n')
+    out = run_collect(repo, "--since", base)
+    assert [i["evidence"] for i in sig(out["impact"], "dependency")] == ["manifest changed"]
+
+
+def test_importer_search_stops_reading_at_cap(repo, monkeypatch):
+    files = {"lib.py": "x = 1\n"}
+    files.update({"u%d.py" % i: "import lib\n" for i in range(5)})
+    base = commit(repo, files, "b")
+    (repo / "lib.py").write_text("x = 2\n")
+    monkeypatch.setattr(collect, "MAX_IMPORTERS", 2)
+    reads = []
+    real = collect.read_regular
+    monkeypatch.setattr(collect, "read_regular",
+                        lambda p: reads.append(p) or real(p))
+    f = {"path": "lib.py", "status": "modified"}
+    found, cut = collect.importers(str(repo), f, {"lib.py"})
+    assert len(found) == 2 and cut is True
+    assert len(reads) <= 3

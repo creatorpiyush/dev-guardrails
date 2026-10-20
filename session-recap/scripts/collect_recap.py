@@ -359,7 +359,7 @@ def api_names(lang, lines):
 def dep_versions(lines):
     deps = {}
     for line in lines:
-        for rx in (DEP_JSON, DEP_PIP, DEP_TOML, DEP_GO):
+        for rx in (DEP_JSON, DEP_PIP, DEP_GO):
             m = rx.match(line)
             if m and m.group(1) not in DEP_NON_NAMES and (
                     rx is DEP_PIP or VERSION.match(m.group(2))):
@@ -368,7 +368,53 @@ def dep_versions(lines):
     return deps
 
 
-def content_signals(path, add, rem):
+TOML_MANIFESTS = ("pyproject.toml", "Cargo.toml")
+TOML_TABLES = ("dependencies", "dev-dependencies", "build-dependencies", "target.*.dependencies",
+               "tool.poetry.dependencies", "tool.poetry.dev-dependencies",
+               "tool.poetry.group.*.dependencies")
+TOML_ARRAYS = ("project.optional-dependencies", "dependency-groups")
+DEP_INLINE = re.compile(r'^\s*([A-Za-z0-9_.\-]+)\s*=\s*\{.*\bversion\s*=\s*"([^"]*)"')
+
+
+def toml_deps(text):
+    """{name: version} from dependency sections only; other tables are never read."""
+    deps, section, in_arr = {}, "", False
+    for line in text.splitlines():
+        h = re.match(r"^\s*\[+\s*([^\]]+?)\s*\]+", line)
+        if h:
+            section, in_arr = h.group(1), False
+            continue
+        if section == "project" and not in_arr:
+            in_arr = bool(re.match(r"^\s*dependencies\s*=\s*\[", line))
+            if not in_arr:
+                continue
+        if section == "project" or section in TOML_ARRAYS:
+            for spec in re.findall(r'"([^"]+)"', line):
+                m = DEP_PIP.match(spec)
+                if m:
+                    deps[m.group(1)] = m.group(2)
+            if section == "project" and "]" in line.split("=", 1)[-1]:
+                in_arr = False
+        elif matches(section, TOML_TABLES):
+            m = DEP_TOML.match(line) or DEP_INLINE.match(line)
+            if m and m.group(1) not in DEP_NON_NAMES and VERSION.match(m.group(2)):
+                deps[m.group(1)] = m.group(2)
+    return deps
+
+
+def toml_dep_pair(root, since, f, warnings):
+    """(new, old) dependency dicts from whole files, or None if either can't be read."""
+    text = read_regular(os.path.join(root, f["path"]))
+    old = ""
+    if f["status"] != "added" and since != EMPTY_TREE:
+        old = git(root, "show", "%s:%s" % (since, f.get("old_path") or f["path"]))
+    if text is None or old is None:
+        warnings.append("impact: could not read %s for dependencies" % f["path"])
+        return None
+    return toml_deps(text), toml_deps(old)
+
+
+def content_signals(path, add, rem, toml_pair=None):
     """Yield (signal, evidence) from changed lines; evidence is derived facts only."""
     lang = lang_of(path)
     if lang:
@@ -381,16 +427,21 @@ def content_signals(path, add, rem):
             if a[n] != r[n] and a[n].startswith("(") and r[n].startswith("("):
                 yield "signature", n
     if matches(path, MANIFESTS):
-        new, old = dep_versions(add), dep_versions(rem)
+        if posixpath.basename(path) in TOML_MANIFESTS:
+            new, old = toml_pair or ({}, {})
+        else:
+            new, old = dep_versions(add), dep_versions(rem)
         found = False
         for n in sorted(set(new) | set(old)):
-            found = True
             if n in new and n in old:
                 if new[n] != old[n]:
+                    found = True
                     yield "dependency", "%s %s→%s" % (n, old[n], new[n])
             elif n in new:
+                found = True
                 yield "dependency", "+%s %s" % (n, new[n])
             else:
+                found = True
                 yield "dependency", "-" + n
         if not found:
             yield "dependency", "manifest changed"
@@ -439,7 +490,7 @@ def import_matcher(f):
         d = posixpath.dirname(path)
         if not d:
             return None
-        rx = re.compile(r'"[^"]*%s"' % re.escape(d))
+        rx = re.compile(r'"(?:[^"]*/)?%s"' % re.escape(d))
         return posixpath.basename(d), "go", lambda ip, text: (
             posixpath.dirname(ip) != d and bool(rx.search(text)))
     return None
@@ -460,6 +511,8 @@ def importers(root, f, changed):
         text = read_regular(os.path.join(root, ip))
         if text and confirm(ip, text):
             found.append(ip)
+            if len(found) > MAX_IMPORTERS:
+                break
     return found[:MAX_IMPORTERS], len(found) > MAX_IMPORTERS
 
 
@@ -495,6 +548,8 @@ def impact_signals(root, since, files, warnings=None):
         if is_secret(path) or is_secret(f.get("old_path") or ""):
             items.append({"signal": "config", "file": path,
                           "evidence": "secret file; contents not read"})
+            if f["status"] == "deleted":
+                items.append({"signal": "deleted", "file": path, "evidence": "file removed"})
             continue
         for sig_, ev in path_signals(path, f["status"]):
             items.append({"signal": sig_, "file": path, "evidence": ev})
@@ -502,7 +557,9 @@ def impact_signals(root, since, files, warnings=None):
                 and not matches(path, LOCKFILES):
             lines = diff_lines(root, since, f, warnings)
             if lines:
-                for sig_, ev in content_signals(path, *lines):
+                pair = (toml_dep_pair(root, since, f, warnings)
+                        if posixpath.basename(path) in TOML_MANIFESTS else None)
+                for sig_, ev in content_signals(path, *lines, toml_pair=pair):
                     items.append({"signal": sig_, "file": path, "evidence": ev})
         found, cut = importers(root, f, changed)
         for ip in found:
