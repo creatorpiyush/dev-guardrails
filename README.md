@@ -12,6 +12,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [pr-writer](#pr-writer) | Not a guard. Drafts a PR title and description from your branch, fills the repo's PR template, and opens the PR only after you approve |
 | [humanizer](#humanizer) | Not a guard. Flags comments and docs in your changes that read like generic AI boilerplate, and rewrites the ones you approve |
 | [test-writer](#test-writer) | Not a guard. Writes tests that match your repo's existing ones, runs them, and checks they can fail before showing you |
+| [session-recap](#session-recap) | Not a guard. Logs what a session did, then writes a short recap of what changed, its impact, what was tested, and what to do differently |
 
 ## Install
 
@@ -27,6 +28,7 @@ In Claude Code:
 /plugin install pr-writer@dev-guardrails
 /plugin install humanizer@dev-guardrails
 /plugin install test-writer@dev-guardrails
+/plugin install session-recap@dev-guardrails
 ```
 
 Or from your shell:
@@ -41,6 +43,7 @@ claude plugin install test-before-commit@dev-guardrails
 claude plugin install pr-writer@dev-guardrails
 claude plugin install humanizer@dev-guardrails
 claude plugin install test-writer@dev-guardrails
+claude plugin install session-recap@dev-guardrails
 ```
 
 Installing a plugin enables its hooks and skills. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -511,6 +514,89 @@ It reads only tracked and untracked files that aren't gitignored, skips vendored
 ### Mutation check
 
 To prove a new test can fail, Claude breaks the code it covers and checks that the test goes red. It does this on a copy, never your working tree: `detect_tests.py --snapshot` copies your tracked and untracked files, without `.git`, into a new `test-writer-*` temp directory. Without `.git` the copy isn't a repo, so git-workflow-guard doesn't block edits there even when you are on `main`. Gitignored files such as `node_modules` and `.venv` aren't copied, so if the tests can't run in the copy, the check is skipped and the report says why. Snapshots are left in place and removed on a later run once they are a day old.
+
+## session-recap
+
+Writes a short recap when you finish a piece of work: what changed, what it may affect, what testing actually ran, and what would make the next session faster. A hook records a local activity log while you work. A script reads the log and git and prints JSON. Claude reads the diff of the riskiest files and writes the recap.
+
+```text
+/session-recap:summary [--since <ref|time>] [--base <branch>] [--save]
+```
+
+| Argument | Meaning |
+| :- | :- |
+| None | Everything since the session's first logged event, or since the merge base with the base branch if there is no log |
+| `--since <ref\|time>` | Start from a commit or ref, or a time such as `2026-10-20T09:00:00` or `2 hours ago` |
+| `--base <branch>` | Base branch for the merge-base fallback. Defaults to `baseBranch` |
+| `--save` | Offer to save the recap. Nothing is written until you say yes |
+
+You can also ask "recap this session" and the skill picks it up. The recap has four sections and stays near `maxWords` words (350 at most):
+
+- **What changed**: 2 to 4 bullets, outcome first.
+- **Impact**: 2 to 4 bullets with a low, medium, or high rating, file evidence, and a label for each: *observed* (the diff shows it) or *inferred* (a judgment).
+- **Testing**: the commands that ran, how often, and how they ended, plus new tests and what isn't covered. With no log it says "no test run recorded". It warns when tests ran before the last edit.
+- **Next time**: 2 to 4 actions, each tied to a logged signal, such as a file edited three or more times, a full-suite run where a targeted command existed, or a repeated failing command. If an earlier recap was saved, one line says which of its items look adopted.
+
+The script reports these impact signals, each with the file that caused it: `public-api`, `signature`, `dependency`, `env-var`, `config`, `migration`, `lockfile`, `ci`, `infra`, `auth`, `deleted`, and `importer` (modules that import a changed file, one hop). Claude offers a `CLAUDE.md` line and, with `--save`, a file at `.claude/recaps/YYYY-MM-DD-slug.md`. Both are written only after you say yes, with the normal edit tools, so a protected branch still blocks `--save` through git-workflow-guard. It never commits, pushes, or posts.
+
+### What is stored, and where
+
+One file per session: `~/.claude/session-recap/<sha256 of the repo's real path, first 16 hex>/<session id>.jsonl`. It never leaves your machine. No plugin code uses the network. Each line is one JSON object:
+
+| Key | Value |
+| :- | :- |
+| `ts` | UTC time, ISO-8601 |
+| `event` | `pre`, `post`, `fail`, `denied`, or `recap_suggested` |
+| `tool` | Tool name |
+| `id` | The tool call id |
+| `path` | Edits: the file path relative to the repo root (absolute if outside it) |
+| `edits` | Edits: how many (1, or the number of edits in a `MultiEdit`) |
+| `command` | Bash or PowerShell: the command, redacted, cut to 500 characters |
+| `kind` | `test`, `lint`, `typecheck`, `build`, `install`, `git`, or `other` |
+| `integration` | `true` when a test command names `integration` or `e2e` |
+| `exit` | `0` after success, the code after a failure, absent if it couldn't be read |
+| `duration_ms` | Duration, when Claude Code provides it |
+| `interrupted` | `true` when the call was interrupted |
+| `reason` | `denied` only: the denial reason, redacted |
+
+It never stores file contents, command output, `tool_response` bodies, or environment variable values. Commands are redacted before they are written: known provider token shapes, URL credentials, `Authorization` headers, and `--password`-style flags. Redaction is pattern-based and can miss a secret in an unusual shape, so keep secrets out of command lines.
+
+Logs older than 14 days are deleted on write. For the repo you are working in, `retentionDays` sets the limit. Other repos' logs always use 14 days, so one repo's config can't shorten another's. Delete `~/.claude/session-recap/` any time to clear everything.
+
+### What the log can't see
+
+- **Exit codes.** Claude Code gives a successful call no exit-code field, so a success is logged as exit 0. Failures come from the `PostToolUseFailure` event, which carries `Exit code N`.
+- **Blocked calls.** No event tells a hook that another plugin blocked or asked about a call. The hook logs each call before it runs (`pre`). A `pre` with no matching result is reported as "no result (blocked, denied, or interrupted, inferred)".
+- **Prompts you approved.** A call that asked and was then allowed looks the same as any other. It can't be detected.
+- **Auto-mode denials.** `PermissionDenied` fires only when the auto-mode classifier denies a call, so those are the only `denied` events.
+
+### Stop nudge (optional)
+
+With `"autoRecap": true`, a `Stop` hook shows one line suggesting `/session-recap:summary` once per session, when the session edited 3 or more distinct files. It never runs the recap and never blocks.
+
+### Configuration
+
+Optional `.claude/session-recap.json` at the repo root:
+
+```json
+{
+  "baseBranch": "main",
+  "retentionDays": 14,
+  "maxWords": 250,
+  "autoRecap": false,
+  "testCommandKinds": ["pytest", "jest", "go test"]
+}
+```
+
+| Key | Default | Meaning |
+| :- | :- | :- |
+| `baseBranch` | `"main"` | Branch used for the merge-base fallback |
+| `retentionDays` | `14` | Days to keep this repo's logs (1 to 365) |
+| `maxWords` | `250` | Target length of the recap (50 to 1000) |
+| `autoRecap` | `false` | Turn on the Stop nudge |
+| `testCommandKinds` | `["pytest", "jest", "go test"]` | Runners whose commands count as tests |
+
+An invalid value makes the whole file fall back to the defaults, with a warning. Unknown keys warn. Set `SESSION_RECAP_DISABLE=1` to turn logging off.
 
 ## Limitations
 

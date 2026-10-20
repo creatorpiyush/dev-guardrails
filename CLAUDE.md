@@ -13,6 +13,7 @@ python -m pytest tests/test_pr_writer.py                         # pr-writer tes
 python -m pytest tests/test_test_before_commit.py                # test-before-commit tests
 python -m pytest tests/test_humanizer.py                         # humanizer tests
 python -m pytest tests/test_test_writer.py                       # test-writer tests
+python -m pytest tests/test_session_recap.py                     # session-recap tests
 python -m pytest -k push                          # tests matching a name
 claude plugin validate .                          # marketplace.json + every relative-path plugin
 claude plugin validate ./<plugin>                 # one plugin's manifest
@@ -133,6 +134,19 @@ No hooks. `skills/write/SKILL.md` (`disable-model-invocation: true`, invoked as 
 - **`--snapshot` is the one write.** It copies `ls-files -co` output, without `.git`, into `mkdtemp(prefix="test-writer-")` with a `.test-writer-snapshot` marker, so the mutation check can edit a copy that git-workflow-guard doesn't treat as a repo. `sweep_snapshots()` removes this user's day-old `test-writer-*` directories, and only those holding the marker. The skill never deletes snapshots itself.
 - The skill must only add or extend test files, never change the code under test, never weaken existing tests, report suspected bugs instead of fixing them, and never commit or push. Test commands aren't in `allowed-tools`, so each one asks. If you change a rule, update SKILL.md and the README together.
 - Tests set `TMPDIR`/`TEMP`/`TMP` per test for snapshots, and write fixtures as untracked files in unborn repos.
+
+### session-recap
+
+No guard. `hooks/log_activity.py` logs, `scripts/collect_recap.py` gathers facts, and `skills/summary/SKILL.md` (`disable-model-invocation: true`, invoked as `/session-recap:summary`) loads `skills/session-recap/SKILL.md` by path. That skill is also model-invocable, so "recap this session" triggers it.
+
+- `hooks/hooks.json` registers the one script on `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` (edit and shell tools), and `Stop`. It follows the same fail-open contract as `git_guard.py`: any error exits 0, it never prints a decision and never exits 2. `SESSION_RECAP_DISABLE=1` exits before reading stdin.
+- The log is `~/.claude/session-recap/<sha256 of realpath, 16 hex>/<session id>.jsonl`. `record()` reads only the fields it names, so contents and output can't reach the log. Commands are redacted first (`SECRET_RULES`, `EXTRA_REDACTIONS`) and capped at 500 characters. Docs facts that shape it: success has no exit-code field (logged as 0), failures come from `PostToolUseFailure`, other plugins' blocks are inferred from a `pre` with no `post`/`fail` by `tool_use_id`, and `PermissionDenied` fires only in auto mode.
+- `prune()` runs on every event. This repo's directory uses its `retentionDays`; other repos' directories always use 14 days, so a checked-in config can't shorten them. Keep it that way.
+- The Stop nudge (`autoRecap`) fires once per session (a `recap_suggested` row marks it) at 3 or more distinct edited files, and skips when `stop_hook_active`.
+- `log_activity.py` imports `load_config` lazily from `collect_recap.py`, so a broken collector fails the hook open.
+- `collect_recap.py` is a single stdlib-only file, Python 3.9 compatible. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `bad-arguments`, `base-not-found`, `since-not-found`, `internal-error`. It never writes files, and every `git` call goes through `git()`. It never reads secret files (path only). `--session` picks the log, else the newest. `previous_recap` parses `## Next time` bullets from the newest `.claude/recaps/*.md`, so the skill's saved headings must stay exact.
+- Skill rules: read the diff of the top 3 impact files, label impact observed or inferred, quote `tests.status` and `stale` exactly, tie each "Next time" item to a field, write a saved recap or `CLAUDE.md` line only after an explicit yes, never commit or push. If you change a rule, update both SKILL.md files and the README together.
+- **Copied pieces, keep in sync:** the shell parsing block and the redaction tables in `log_activity.py` (from `git_guard.py` and `secret-scan-guard/hooks/patterns.py`), and `log_dir`/`safe_session` in `collect_recap.py` (from `log_activity.py`), all checked by `tests/test_copies_in_sync.py`.
 
 ### Tests
 
