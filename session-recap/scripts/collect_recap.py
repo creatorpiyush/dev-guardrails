@@ -698,7 +698,12 @@ def is_full_suite(command, root):
     for a in args:
         if a in ("-k", "-t", "-run") or "::" in a or a.startswith(("-k", "-run=")):
             return False
-        if not a.startswith("-") and os.path.exists(os.path.join(root, a)):
+        if a.startswith("-"):
+            continue
+        # Go's `./pkg/...` names the dir `./pkg`. Strip it here: Windows drops trailing dots, so
+        # `./...` would otherwise "exist". The repo root itself (`.`, `./...`) selects nothing.
+        path = os.path.normpath(os.path.join(root, a[:-4] if a.endswith("/...") else a))
+        if path != os.path.normpath(root) and os.path.exists(path):
             return False
     return True
 

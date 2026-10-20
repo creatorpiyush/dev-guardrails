@@ -1070,6 +1070,16 @@ def test_longest_commands_top_five():
         ["c6", "c5", "c4", "c3", "c2"]
 
 
+@pytest.mark.parametrize("command, full", [
+    ("pytest .", True), ("pytest ./", True), ("go test ./...", True),
+    ("go test ./pkg/...", False), ("pytest tests", False),
+])
+def test_root_args_are_full_suite_and_go_patterns_are_paths(repo, command, full):
+    (repo / "pkg").mkdir()
+    (repo / "tests").mkdir()
+    assert collect.is_full_suite(command, str(repo)) is full
+
+
 def test_full_suite_with_targeted_suggestion(repo, monkeypatch):
     (repo / "tests").mkdir()
     (repo / "tests" / "test_a.py").write_text("")
