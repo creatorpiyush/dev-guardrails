@@ -19,7 +19,7 @@ claude plugin validate .                          # marketplace.json + every rel
 claude plugin validate ./<plugin>                 # one plugin's manifest
 ```
 
-There is no build or lint step. CI (`.github/workflows/ci.yml`) runs pytest on ubuntu/macos/windows across Python 3.9 to 3.15, and parses every `*.json` file with `python3 -m json.tool`.
+There is no build or lint step. CI (`.github/workflows/ci.yml`) runs pytest on ubuntu across Python 3.9 to 3.15 and on macos/windows with 3.9 and 3.15, and parses every `*.json` file with `python3 -m json.tool`.
 
 To try changes in a real session: `claude plugin marketplace add ./` then `claude plugin install git-workflow-guard@dev-guardrails`. A marketplace added from a local path loads plugins in place, so `/reload-plugins` picks up edits. For a one-off check without installing: `claude -p --plugin-dir ./git-workflow-guard "..."`.
 
