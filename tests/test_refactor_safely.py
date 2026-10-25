@@ -496,9 +496,13 @@ def test_output_is_ansi_stripped_before_reading(covered):
     assert baseline(covered)["baseline"]["total"] == 2
 
 
-@pytest.mark.parametrize("text", ["\n" * 200000, " \n" * 100000, "\t" * 300000, "a." * 200000])
-def test_pathological_output_is_read_quickly(text):
+@pytest.mark.parametrize("unit,count", [("\n", 200000), (" \n", 100000), ("\t", 300000), ("a.", 200000)],
+                         ids=["blank-lines", "space-newlines", "tabs", "dotted"])
+def test_pathological_output_is_read_quickly(unit, count):
+    # Built here, not in the parameters: pytest puts parameter values in the test id, and on
+    # Windows an environment variable over 32767 characters is an error.
     import time
+    text = unit * count
     start = time.time()
     assert load().read_output(text)["framework"] is None
     assert time.time() - start < 5
