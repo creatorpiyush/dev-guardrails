@@ -137,3 +137,9 @@ def test_detect_tests_copied_to_bug_reproducer():
     original = ROOT / "test-writer" / "scripts" / "detect_tests.py"
     copy = ROOT / "bug-reproducer" / "scripts" / "detect_tests.py"
     assert original.read_bytes() == copy.read_bytes()
+
+
+def test_detect_tests_copied_to_refactor_safely():
+    original = ROOT / "test-writer" / "scripts" / "detect_tests.py"
+    copy = ROOT / "refactor-safely" / "scripts" / "detect_tests.py"
+    assert original.read_bytes() == copy.read_bytes()

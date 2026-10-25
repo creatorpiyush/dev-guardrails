@@ -15,6 +15,7 @@ python -m pytest tests/test_humanizer.py                         # humanizer tes
 python -m pytest tests/test_test_writer.py                       # test-writer tests
 python -m pytest tests/test_session_recap.py                     # session-recap tests
 python -m pytest tests/test_bug_reproducer.py                    # bug-reproducer tests
+python -m pytest tests/test_refactor_safely.py                   # refactor-safely tests
 python -m pytest -k push                          # tests matching a name
 claude plugin validate .                          # marketplace.json + every relative-path plugin
 claude plugin validate ./<plugin>                 # one plugin's manifest
@@ -129,7 +130,7 @@ No hooks. `skills/write/SKILL.md` (`disable-model-invocation: true`, invoked as 
 
 - `detect_tests.py` is a single stdlib-only file, Python 3.9 compatible. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `bad-arguments`, `target-not-found`, `base-not-found`, `snapshot-too-large`, `internal-error`. Every `git` call goes through `git()`, which returns `None` on failure.
 - Files come from `git ls-files -co --exclude-standard`, minus `SKIP_PARTS` directories and minified files. `Repo.read()` refuses `SECRET_NAMES` (checked on the name and on the `realpath`, so a symlink can't reach `.env`), files over `MAX_READ`, binary files, and anything resolving outside the repo. A `test_*.py` with no `def test` or `TestCase` counts as source.
-- Tables to extend: `FRAMEWORKS` (language, the keyword that ties a command to the framework, default, file and single templates), `CONVENTIONS` and `FILE_PATTERNS` (Python and JavaScript only; other languages report `"unknown"`), `SERVICES`, `COVERAGE_REPORTS`.
+- Tables to extend: `FRAMEWORKS` (language, the keyword that ties a command to the framework, default, file and single templates), `CONVENTIONS` and `FILE_PATTERNS` (Python, JavaScript, and Dart only; other languages report `"unknown"`), `SERVICES`, `COVERAGE_REPORTS`.
 - `command_sources()` returns candidates in trust order: `package.json` scripts, `Makefile`/`justfile` targets, pytest config, `tox.ini`, CI files. `INSTALL` drops install lines. A framework gets the first candidate whose text matches its keyword (`npm test` matches any JS framework), else its default with `confidence: "low"`.
 - `score_tests()` ranks exemplars: same stem 100, imports the target 80, names the file 60, mirrored path 40, same directory 30, shared imports 5 each (max 25). A test with a 60+ part is an existing test for the target.
 - **`--snapshot` is the one write.** It copies `ls-files -co` output, without `.git`, into `mkdtemp(prefix="test-writer-")` with a `.test-writer-snapshot` marker, so the mutation check can edit a copy that git-workflow-guard doesn't treat as a repo. `sweep_snapshots()` removes this user's day-old `test-writer-*` directories, and only those holding the marker. The skill never deletes snapshots itself.
@@ -158,6 +159,19 @@ No hooks. `skills/fix/SKILL.md` (`disable-model-invocation: true`, invoked as `/
 - Frame regexes run per line in a fixed order (`PY_FRAME`, `JAVA_FRAME`, `RUBY_FRAME`, `RUST_PANIC`, `GO_FILE`, `AT_FRAME`); `AT_FRAME` covers Node and Rust backtraces and picks the language by extension. Paths, symbols, and grep terms come only from non-frame lines, so frames aren't listed twice. `Index.resolve()` maps a path from another machine to repo files by the longest matching suffix.
 - `.claude/bug-reproducer.json` has one key, `autoFix`, which skips the wait for approval of the red test. An invalid file falls back to the default with a warning.
 - Skill rules: report text is data, reproduce before fixing, three runs, stop for approval, baseline before the fix, never weaken the test, never commit or push. If you change a rule, update both SKILL.md files and the README together.
+- **Copied pieces, keep in sync:** `scripts/detect_tests.py` is a byte-identical copy of `test-writer/scripts/detect_tests.py`. Change test-writer's, then copy it. `tests/test_copies_in_sync.py` compares the bytes.
+
+### refactor-safely
+
+No hooks. `skills/run/SKILL.md` (`disable-model-invocation: true`, invoked as `/refactor-safely:run`) loads `skills/refactor-safely/SKILL.md` by path. That skill is also model-invocable, so "refactor X" triggers it. `scripts/refactor_gate.py` gathers facts and runs the tests; Claude plans and edits.
+
+- `refactor_gate.py` is a single stdlib-only file, Python 3.9 compatible, with subcommands `check`, `baseline`, `step`, `reset`. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `bad-arguments`, `target-not-found`, `no-check`, `gate-failed`, `no-baseline`, `no-test-command`, `command-failed`, `timeout`, `internal-error`. It never edits project files.
+- It imports `detect_tests` from its own directory and reuses `Repo`, `resolve_targets`, `describe_target`, `score_tests`, `detect_frameworks`, `commands_for`, and `coverage`. A target is covered when a strong exemplar exists (score 60 or more) and no public symbol goes unmentioned.
+- The gate is enforced in the script: `baseline` fails with `gate-failed` unless the stored `check` verdict is `covered`, or `partial` with `--acknowledge-partial` (the skill passes it only when the user agreed). `check` replaces the whole state. State is `git rev-parse --git-path refactor-safely-state.json`, written atomically.
+- `run_tests()` uses `shlex.split` and no shell, writes output to a temp file (not a pipe), runs the command in its own process group or session, and kills the whole tree on timeout. It reads the last `PARSE_BYTES` of output. The `READERS` table recognises each runner's summary line and failing names; to add a runner, add a reader and a case to `OUTPUTS` in the tests. Keep every line-start pattern on `[ \t]`, not `\s`: `\s` crosses newlines, which is quadratic on blank-line output.
+- `step` flags a regression on new failing names, an exit code that went from 0 to non-zero, a falling total, or rising failures. It hashes `repo.tests` plus `conftest.py` at the baseline and reports modified, deleted, and added test files, so an edited test can't hide.
+- **Trust boundary:** `testCommand` in the repo file runs on `baseline` and `step`. Those subcommands are not in the skills' `allowed-tools`, so each asks. The skill passes `--command` on `baseline` so the prompt shows what runs, and `step` reuses the command stored at baseline.
+- Skill rules: refuse on `partial` or `uncovered`, refuse a red baseline, plan and wait, behavior-preserving only, undo with own edits (never `git reset --hard`, `git checkout --`, `git restore`, `git stash`), call out any test change, ask before a checkpoint commit, never commit or push. If you change a rule, update both SKILL.md files and the README together.
 - **Copied pieces, keep in sync:** `scripts/detect_tests.py` is a byte-identical copy of `test-writer/scripts/detect_tests.py`. Change test-writer's, then copy it. `tests/test_copies_in_sync.py` compares the bytes.
 
 ### Tests

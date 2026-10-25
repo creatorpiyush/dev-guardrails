@@ -55,6 +55,11 @@
       "name": "bug-reproducer",
       "source": "./bug-reproducer",
       "description": "Fixes a reported bug test-first: writes the smallest failing test in your repo's style, confirms it fails for the reported reason, waits for your approval, then makes the minimal fix."
+    },
+    {
+      "name": "refactor-safely",
+      "source": "./refactor-safely",
+      "description": "Refuses to refactor code that lacks tests, refactors in small planned steps, and re-runs the tests after every step."
     }
   ]
 }

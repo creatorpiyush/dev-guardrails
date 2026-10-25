@@ -137,6 +137,11 @@ def test_custom_rule(repo):
     assert run_hook(edit(repo / ".env")).returncode == 2  # defaults still apply
 
 
+def test_pubspec_lock_asks_and_points_to_pub(repo):
+    kind, reason = decision(run_hook(edit(repo / "pubspec.lock")))
+    assert kind == "ask" and "flutter pub add" in reason
+
+
 def test_replace_defaults(repo):
     config(repo, {"replaceDefaults": True,
                   "rules": [{"pattern": "*.lock", "action": "ask", "reason": "custom"}]})

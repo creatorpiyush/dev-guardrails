@@ -34,7 +34,7 @@ If `python3` is missing, use `python`. The script prints one JSON object and onl
 
 - `ok` false: explain `error.code` in plain words (`not-a-repo`, `bad-arguments`, `internal-error`), suggest the fix, and stop.
 - Show every `warnings` entry.
-- `frames`: parsed stack frames (Python, JS/TS, Java, Go, Rust, Ruby). `repo_paths` are the repo files each frame can mean. Empty means the frame is in a dependency or the runtime.
+- `frames`: parsed stack frames (Python, JS/TS, Java, Go, Rust, Ruby, Dart/Flutter). `repo_paths` are the repo files each frame can mean. Empty means the frame is in a dependency or the runtime.
 - `paths`, `symbols` (with `definitions`), `errors`, `exit_codes`, `versions`: what the report mentions, and where it lives in the repo.
 - `grep`: where distinctive strings from the report appear. `truncated` means there were more hits.
 - `tests`: the test `commands` (with `source` and `confidence`), `conventions`, and for each candidate file its `existing_tests` and nearest `exemplars`. `confidence: "low"` means nothing in the repo named a command. Say so and ask before relying on it. No `frameworks`: ask which framework and command to use.

@@ -90,7 +90,7 @@ INTEGRITY = re.compile(r"\bsha(?:1|256|384|512)-[A-Za-z0-9+/=]+")
 SKIP_NAMES = {
     "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock",
     "poetry.lock", "Pipfile.lock", "uv.lock", "Cargo.lock", "go.sum", "composer.lock",
-    "Gemfile.lock", "packages.lock.json",
+    "Gemfile.lock", "packages.lock.json", "pubspec.lock",
 }
 SKIP_SUFFIXES = (".min.js", ".min.css", ".map")
 

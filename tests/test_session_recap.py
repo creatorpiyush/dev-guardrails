@@ -418,6 +418,14 @@ DEFAULT_TESTS = ["pytest", "jest", "go test"]
     ("pnpm test:unit", "test", False),
     ("yarn run test", "test", False),
     ("yarn test:unit", "test", False),
+    ("flutter test", "test", False),
+    ("fvm flutter test test/cart_test.dart", "test", False),
+    ("dart test", "test", False),
+    ("flutter analyze", "typecheck", False),
+    ("dart analyze lib", "typecheck", False),
+    ("flutter build apk", "build", False),
+    ("flutter pub get", "install", False),
+    ("dart pub add http", "install", False),
     ("bundle exec rspec", "test", False),
     ("bundle exec rake test", "test", False),
     ("npm run test:e2e", "test", True),
@@ -1128,6 +1136,10 @@ def test_project_test_command_and_claude_md_mention(repo):
     ({"pyproject.toml": "[tool.pytest.ini_options]\n"}, "pytest"),
     ({"go.mod": "module x\n"}, "go test ./..."),
     ({"Cargo.toml": "[package]\n"}, "cargo test"),
+    ({"pubspec.yaml": "dependencies:\n  flutter:\n    sdk: flutter\n"}, "flutter test"),
+    ({"pubspec.yaml": "name: x\ndev_dependencies:\n  test: ^1.0.0\n"}, "dart test"),
+    ({"pubspec.yaml": "dependencies:\n  flutter:\n    sdk: flutter\n", ".fvmrc": "{}"}, "fvm flutter test"),
+    ({"pubspec.yaml": "name: x\ndev_dependencies:\n  test: ^1.0.0\n", ".fvmrc": "{}"}, "fvm dart test"),
     ({}, "unknown"),
 ])
 def test_project_test_command_sources(repo, files, cmd):
@@ -1189,3 +1201,39 @@ def test_suggested_only_for_known_runners(repo):
     assert got["python -m pytest"] == "python -m pytest tests/test_a.py"
     assert got["npx jest"] == "npx jest web/a.test.ts"
     assert got["go test ./..."] == "go test ./... ./pkg/x/..."
+
+
+# ---------------------------------------------------------------- dart and flutter
+
+def test_dart_public_api_signature_and_importers(repo):
+    base = commit(repo, {
+        "pubspec.yaml": "name: shop\n",
+        "lib/src/cart.dart": "class Cart {\n}\n\nint total(int a) {\n  return a;\n}\n",
+        "lib/ui.dart": "import 'package:shop/src/cart.dart';\n",
+        "lib/src/util.dart": "import 'cart.dart';\n",
+        "lib/src/other.dart": "import 'dart:async';\nimport 'package:shop/src/cart_other.dart';\n",
+    }, "b")
+    (repo / "lib" / "src" / "cart.dart").write_text(
+        "class Cart {\n}\n\nint total(int a, int b) {\n  return a;\n}\n\nclass _Hidden {}\n\nmixin Logging {}\n")
+    items = impact(repo, base)
+    api = {(i["file"], i["evidence"]) for i in sig(items, "public-api")}
+    assert api == {("lib/src/cart.dart", "+Logging")}
+    assert [i["evidence"] for i in sig(items, "signature")] == ["total"]
+    assert {i["evidence"] for i in sig(items, "importer")} == {"lib/ui.dart", "lib/src/util.dart"}
+
+
+def test_dart_manifest_and_lockfile_signals(repo):
+    base = commit(repo, {"pubspec.yaml": "name: x\n", "pubspec.lock": "a\n"}, "b")
+    (repo / "pubspec.yaml").write_text("name: x\ndependencies:\n  http: ^1.0.0\n")
+    (repo / "pubspec.lock").write_text("b\n")
+    items = impact(repo, base)
+    assert [i["file"] for i in sig(items, "lockfile")] == ["pubspec.lock"]
+    assert any(i["file"] == "pubspec.yaml" for i in sig(items, "dependency"))
+
+
+def test_dart_test_files_and_targeted_command():
+    assert collect.is_test_file("test/cart_test.dart") and not collect.is_test_file("lib/cart.dart")
+    assert collect.suggest_targeted("flutter test", ["test/a_test.dart", "README.md"]) == (
+        "flutter test test/a_test.dart")
+    assert collect.suggest_targeted("dart test", ["test/a_test.dart"]) == "dart test test/a_test.dart"
+    assert collect.runner_args("fvm flutter test test/a_test.dart")[0] == "flutter test"

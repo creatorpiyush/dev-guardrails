@@ -44,12 +44,13 @@ SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "id_dsa*", "id_ec
                 ".netrc", ".pypirc", ".npmrc")
 SECRET_ALLOW = (".env.example", ".env.sample", ".env.template")
 SKIP_PARTS = {"node_modules", "vendor", "third_party", "dist", "build", "target", ".venv",
-              "venv", "__pycache__", ".tox", ".git"}
+              "venv", "__pycache__", ".tox", ".git", ".dart_tool"}
+GENERATED = (".min.js", ".min.css", ".g.dart", ".freezed.dart", ".gr.dart", ".mocks.dart")
 
 LANGS = {".py": "python", ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
          ".cjs": "javascript", ".ts": "javascript", ".tsx": "javascript", ".mts": "javascript",
          ".cts": "javascript", ".go": "go", ".rs": "rust", ".java": "java", ".kt": "java",
-         ".rb": "ruby", ".php": "php", ".cs": "csharp"}
+         ".rb": "ruby", ".php": "php", ".cs": "csharp", ".dart": "dart"}
 
 # name: (language, keyword that ties a command to it, default run, file template, single template)
 FRAMEWORKS = {
@@ -71,6 +72,10 @@ FRAMEWORKS = {
               "bundle exec rspec {file}:{line}"),
     "phpunit": ("php", r"\bphpunit\b", "vendor/bin/phpunit", "vendor/bin/phpunit {file}",
                 "vendor/bin/phpunit {file} --filter '{name}'"),
+    "flutter test": ("dart", r"\bflutter test\b", "flutter test", "flutter test {file}",
+                     "flutter test {file} --plain-name '{name}'"),
+    "dart test": ("dart", r"\bdart test\b", "dart test", "dart test {file}",
+                  "dart test {file} --plain-name '{name}'"),
     "dotnet test": ("csharp", r"\bdotnet test\b", "dotnet test",
                     "dotnet test --filter 'FullyQualifiedName~{class}'",
                     "dotnet test --filter 'FullyQualifiedName~{class}.{name}'"),
@@ -118,10 +123,30 @@ CONVENTIONS = {
         ("aaa_comments", "Given/When/Then", r"//\s*(?:Given|When|Then)\b"),
     ],
 }
+CONVENTIONS["dart"] = [
+    ("naming", "test()", r"^\s*test\("),
+    ("naming", "testWidgets()", r"\btestWidgets\("),
+    ("naming", "group()", r"^\s*group\("),
+    ("mocking", "mockito", r"package:mockito/|@GenerateMocks|@GenerateNiceMocks"),
+    ("mocking", "mocktail", r"package:mocktail/"),
+    ("mocking", "bloc_test", r"package:bloc_test/"),
+    ("mocking", "fakes", r"\bextends Fake\b|\bimplements \w+\s*\{"),
+    ("assertions", "expect()", r"\bexpect\("),
+    ("assertions", "expectLater()", r"\bexpectLater\("),
+    ("assertions", "find.* finders", r"\bfind\.(?:text|byType|byKey|byWidget|byIcon|bySemanticsLabel)\b"),
+    ("assertions", "golden files", r"\bmatchesGoldenFile\b"),
+    ("parametrize", "loops over cases", r"^\s*for\s*\(\s*(?:final|var)\b.*\bin\b"),
+    ("setup", "setUp/tearDown", r"\b(?:setUp|tearDown)(?:All)?\("),
+    ("setup", "pumpWidget", r"\.pumpWidget\("),
+    ("aaa_comments", "Arrange/Act/Assert", r"//\s*(?:Arrange|Act|Assert)\b"),
+    ("aaa_comments", "Given/When/Then", r"//\s*(?:Given|When|Then)\b"),
+]
 FILE_PATTERNS = {
     "python": [("test_*.py", r"(^|/)test_[^/]*\.py$"), ("*_test.py", r"_test\.py$")],
     "javascript": [("*.test.*", r"\.test\.[^./]+$"), ("*.spec.*", r"\.spec\.[^./]+$"),
                    ("__tests__/", r"(^|/)__tests__/")],
+    "dart": [("*_test.dart", r"_test\.dart$"), ("test/", r"(^|/)test/"),
+             ("integration_test/", r"(^|/)integration_test/")],
 }
 
 SERVICES = [
@@ -136,6 +161,9 @@ SERVICES = [
     ("cache", r"""(?:from\s+|require\(\s*)['"](?:redis|ioredis|memcached)['"]"""),
     ("network", r"""(?:from\s+|require\(\s*)['"](?:axios|node-fetch|got|undici|aws-sdk|@aws-sdk/[^'"]+)['"]"""),
     ("queue", r"""(?:from\s+|require\(\s*)['"](?:amqplib|kafkajs|bullmq|bull)['"]"""),
+    ("database", r"""^\s*import\s+['"]package:(?:sqflite|drift|isar|hive|floor|postgres|mongo_dart)/"""),
+    ("network", r"""^\s*import\s+['"]package:(?:http|dio|chopper|retrofit|grpc|web_socket_channel"""
+                r"""|cloud_firestore|firebase_[a-z_]+)/"""),
 ]
 
 COVERAGE_REPORTS = ("coverage.xml", "cobertura.xml", "lcov.info", "coverage/lcov.info",
@@ -200,7 +228,7 @@ def is_secret(path):
 
 def skipped(path):
     parts = path.split("/")
-    return bool(SKIP_PARTS.intersection(parts[:-1])) or parts[-1].endswith((".min.js", ".min.css"))
+    return bool(SKIP_PARTS.intersection(parts[:-1])) or parts[-1].endswith(GENERATED)
 
 
 def is_test(path):
@@ -220,6 +248,8 @@ def is_test(path):
         return "tests" in dirs
     if lang == "java":
         return bool(re.search(r"(?:Test|Tests|IT|Spec)$", stem)) or ("src" in dirs and "test" in dirs)
+    if lang == "dart":
+        return name.endswith("_test.dart")
     if lang == "ruby":
         return stem.endswith(("_spec", "_test")) or name.startswith("test_")
     if lang == "php":
@@ -345,6 +375,18 @@ def detect_frameworks(repo):
     for f in repo.named(".mocharc*"):
         add("mocha", f)
 
+    pubspec = repo.read("pubspec.yaml") or ""
+    if re.search(r"^\s*flutter_test:|^\s*sdk:\s*flutter\b", pubspec, re.M):
+        add("flutter test", "pubspec.yaml")
+    elif re.search(r"^\s*test:", pubspec, re.M):
+        add("dart test", "pubspec.yaml")
+    for f in [t for t in repo.tests if language(t) == "dart"][:SAMPLE]:
+        text = repo.read(f) or ""
+        if "package:flutter_test/" in text:
+            add("flutter test", f)
+        elif "package:test/" in text:
+            add("dart test", f)
+
     if "go.mod" in repo.fileset:
         add("go test", "go.mod")
     if "Cargo.toml" in repo.fileset:
@@ -437,6 +479,9 @@ def commands_for(repo, frameworks):
                 single_t = tool + " test --tests '{class}.{name}'"
             elif "mvnw" in repo.fileset:
                 default, file_t, single_t = (t.replace("mvn ", "./mvnw ", 1) for t in (default, file_t, single_t))
+        if lang == "dart" and (".fvmrc" in repo.fileset or ".fvm/fvm_config.json" in repo.fileset):
+            # The repo pins its Flutter SDK with FVM, so a bare `flutter` may be the wrong version.
+            default, file_t, single_t = ("fvm " + t for t in (default, file_t, single_t))
         matches = []
         for source, run, text, confidence, script in sources:
             # `npm test` runs whatever JS framework the repo has, even through a wrapper.
@@ -484,6 +529,12 @@ def conventions(repo):
 
 # ---------------------------------------------------------------- targets
 
+# A top-level Dart function: a return type, then name(...) followed by a body. Column 0 only.
+DART_FUNCTION = (r"^(?:[A-Za-z_][\w<>?,\[\] .]*\s)?([A-Za-z]\w*)\s*(?:<[^>\n]*>)?\([^;{}]*\)"
+                 r"\s*(?:async\*?|sync\*)?\s*(?:\{|=>)")
+DART_KEYWORDS = {"if", "for", "while", "switch", "catch", "return", "else", "do", "try", "assert"}
+
+
 def public_symbols(lang, text):
     names = []
     if lang == "python":
@@ -515,6 +566,11 @@ def public_symbols(lang, text):
     elif lang == "ruby":
         names = re.findall(r"^\s*(?:class|module)\s+([A-Z]\w*)", text, re.M)
         names += re.findall(r"^\s*def\s+(?:self\.)?([a-z_]\w*[?!]?)", text, re.M)
+    elif lang == "dart":
+        names = re.findall(r"^(?:(?:abstract|base|final|sealed|interface|mixin)\s+)*(?:class|mixin|enum)\s+"
+                           r"([A-Za-z]\w*)", text, re.M)
+        names += re.findall(r"^(?:extension\s+type|extension|typedef)\s+([A-Za-z]\w*)", text, re.M)
+        names += [n for n in re.findall(DART_FUNCTION, text, re.M) if n not in DART_KEYWORDS]
     elif lang == "php":
         names = re.findall(r"^\s*(?:final\s+|abstract\s+)?class\s+(\w+)", text, re.M)
         names += re.findall(r"\bpublic\s+(?:static\s+)?function\s+(\w+)", text)
@@ -555,6 +611,13 @@ def imports(path, text):
                 spec = posixpath.normpath(posixpath.join(posixpath.dirname(path), spec))
                 spec = re.sub(r"\.(?:[cm]?[jt]sx?)$", "", spec)
             found.add(spec)
+    elif language(path) == "dart":
+        for spec in re.findall(r"""^\s*(?:import|export|part)\s+['"]([^'"]+)['"]""", text, re.M):
+            if spec.startswith("dart:"):
+                continue
+            if not spec.startswith("package:"):
+                spec = posixpath.normpath(posixpath.join(posixpath.dirname(path), spec))
+            found.add(spec)
     return {f for f in found if f}
 
 
@@ -566,6 +629,10 @@ def imports_target(test_imports, target):
     if lang == "javascript":
         bare = re.sub(r"\.(?:[cm]?[jt]sx?)$", "", target)
         return bare in test_imports or (bare.endswith("/index") and bare[:-6] in test_imports)
+    if lang == "dart":
+        rest = target[4:] if target.startswith("lib/") else target
+        return any(m == target or (m.startswith("package:") and m.endswith("/" + rest))
+                   for m in test_imports)
     return False
 
 
@@ -614,12 +681,18 @@ DEFINITION = (r"(?:\b(?:def|class|function|func|fn|interface|struct|trait|enum|t
               r"|\b(?:public|private|protected|static)\b[\w \t<>\[\],.?]*\s{name}\s*\()")
 
 
+DART_DEFINITION = (r"^(?:(?:abstract|base|final|sealed|interface|mixin)\s+)*(?:class|mixin|enum|typedef"
+                   r"|extension(?:\s+type)?)\s+{name}\b|^(?:[A-Za-z_][\w<>?,\[\] .]*\s)?{name}\s*"
+                   r"(?:<[^>\n]*>)?\([^;{{}}]*\)\s*(?:async\*?|sync\*)?\s*(?:\{{|=>)")
+
+
 def find_symbol(repo, name):
     rx = re.compile(DEFINITION.format(name=re.escape(name)), re.M)
+    dart = re.compile(DART_DEFINITION.format(name=re.escape(name)), re.M)
     hits = []
     for f in repo.sources[:MAX_SCAN]:
         text = repo.read(f) or ""
-        m = rx.search(text)
+        m = (dart if f.endswith(".dart") else rx).search(text)
         if m:
             hits.append((f, text.count("\n", 0, m.start()) + 1))
     return hits
@@ -708,6 +781,8 @@ def coverage(repo, frameworks):
         tools.append("jest --coverage (built in)")
     if "go test" in names:
         tools.append("go test -cover (built in)")
+    if "flutter test" in names:
+        tools.append("flutter test --coverage (built in)")
     if any("jacoco" in (repo.read(f) or "") for f in ("pom.xml", "build.gradle", "build.gradle.kts")):
         tools.append("jacoco")
     if any("coverlet" in (repo.read(f) or "") for f in repo.named("*.csproj")):

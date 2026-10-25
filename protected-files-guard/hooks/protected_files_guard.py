@@ -31,7 +31,7 @@ CONFIG_FILE = ".claude/protected-files.json"
 LOCK_REASON = (
     "lockfiles are generated. Change dependencies through the package manager "
     "(npm install <pkg>, yarn add, pnpm add, poetry add, uv add, cargo add, bundle add, "
-    "composer require, go get) and let it rewrite the lockfile, not by hand"
+    "composer require, go get, dart pub add, flutter pub add) and let it rewrite the lockfile, not by hand"
 )
 CI_REASON = "CI/CD config runs with repository secrets and gates merges, so it changes only on purpose"
 MIGRATION_REASON = (
@@ -45,7 +45,7 @@ SECRET_REASON = "it holds secrets or private keys. Ask the user to change it the
 # any depth, like .gitignore. One with "/" is anchored at the repo root.
 DEFAULT_RULES = [
     (["package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "uv.lock",
-      "Cargo.lock", "Gemfile.lock", "composer.lock", "go.sum"], "ask", LOCK_REASON),
+      "Cargo.lock", "Gemfile.lock", "composer.lock", "go.sum", "pubspec.lock"], "ask", LOCK_REASON),
     ([".github/workflows/**", ".gitlab-ci.yml", "Jenkinsfile", ".circleci/**"], "ask", CI_REASON),
     (["**/migrations/**", "**/alembic/versions/**", "**/db/migrate/**"], "ask", MIGRATION_REASON),
     (["LICENSE*", "CODEOWNERS", "SECURITY.md"], "ask", POLICY_REASON),

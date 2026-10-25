@@ -1,0 +1,13 @@
+{
+  "name": "refactor-safely",
+  "version": "1.0.0",
+  "description": "Refuses to refactor code that lacks tests, refactors in small planned steps, and re-runs the tests after every step.",
+  "author": {
+    "name": "Piyush Anand",
+    "email": "piyushanand.1221@gmail.com"
+  },
+  "repository": "https://github.com/creatorpiyush/dev-guardrails",
+  "homepage": "https://github.com/creatorpiyush/dev-guardrails#readme",
+  "license": "MIT",
+  "keywords": ["refactoring", "tests", "characterization-tests", "safety", "small-steps"]
+}

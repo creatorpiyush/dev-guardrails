@@ -279,9 +279,10 @@ def change_facts(root, since):
 SECRET_NAMES = (".env", ".env.*", "*.pem", "*.key", "id_rsa*", "*.p12", "credentials.json")
 SECRET_ALLOW = (".env.example", ".env.sample", ".env.template")
 MANIFESTS = ("package.json", "pyproject.toml", "requirements*.txt", "setup.py", "setup.cfg",
-             "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml", "build.gradle*")
+             "go.mod", "Cargo.toml", "Gemfile", "composer.json", "pom.xml", "build.gradle*",
+             "pubspec.yaml")
 LOCKFILES = ("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "uv.lock",
-             "Cargo.lock", "go.sum", "Gemfile.lock", "composer.lock")
+             "Cargo.lock", "go.sum", "Gemfile.lock", "composer.lock", "pubspec.lock")
 CI_PATHS = (".github/workflows/*", ".gitlab-ci.yml", ".circleci/*", "Jenkinsfile",
             "azure-pipelines.yml", ".buildkite/*")
 INFRA_PATHS = ("Dockerfile*", "docker-compose*", "compose.y*ml", "*.tf", "Chart.yaml",
@@ -295,7 +296,7 @@ AUTH_WORDS = re.compile(
 MAX_IMPORTERS = 20
 LANG_EXTS = {
     "py": (".py",), "js": (".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx"), "go": (".go",),
-    "rs": (".rs",), "public": (".java", ".kt", ".cs"),
+    "rs": (".rs",), "public": (".java", ".kt", ".cs"), "dart": (".dart",),
 }
 # (regex, name group, rest group or None); matched against one diff line without its +/-.
 API_PATTERNS = {
@@ -305,6 +306,11 @@ API_PATTERNS = {
     "go": re.compile(r"^func\s+([A-Z]\w*)(.*)"),
     "rs": re.compile(r"^pub\s+(?:async\s+)?(?:fn|struct|enum|trait)\s+(\w+)(.*)"),
     "public": re.compile(r"^\s*public\s+(?:[^(={;]*?\s)?(\w+)\s*([(={;].*|$)"),
+    # Column 0 only, so methods and statements are skipped; _private names never match.
+    "dart": re.compile(r"^(?:(?:(?:abstract|base|final|sealed|interface|mixin)\s+)*"
+                       r"(?:class|mixin|enum|typedef)\s+|extension\s+(?:type\s+)?(?!on\b)"
+                       r"|(?:[A-Za-z_][\w<>?,\[\] .]*\s)?(?!(?:if|for|while|switch|catch|return|else|do|try"
+                       r"|assert)\b)(?=[A-Za-z]\w*\s*[(<]))([A-Za-z]\w*)(.*)"),
 }
 ENV_PATTERNS = [re.compile(p) for p in (
     r"os\.environ\[\s*['\"](\w+)", r"os\.getenv\(\s*['\"](\w+)", r"environ\.get\(\s*['\"](\w+)",
@@ -504,6 +510,20 @@ def import_matcher(f):
                     return True
             return False
         return stem, "js", js
+    if lang == "dart":
+        rest = path[4:] if path.startswith("lib/") else None
+        spec = re.compile(r"""^\s*(?:import|export|part)\s+['"]([^'"]+)['"]""", re.M)
+
+        def dart(ip, text):
+            for s in spec.findall(text):
+                if s.startswith("package:"):
+                    if rest and "/" in s and s.split("/", 1)[1] == rest:
+                        return True
+                elif not s.startswith("dart:"):
+                    if posixpath.normpath(posixpath.join(posixpath.dirname(ip), s)) == path:
+                        return True
+            return False
+        return stem, "dart", dart
     if lang == "go":
         d = posixpath.dirname(path)
         if not d:
@@ -615,13 +635,13 @@ TEST_STEM = re.compile(r"^test_|_test$|\.test$|\.spec$")
 RUN_EVENTS = ("post", "fail")
 LIST_CAP = 20  # efficiency lists; the cut count goes in efficiency.truncated
 KIND_NAMES = ("test", "lint", "typecheck", "build")
-RUNNER_PREFIXES = (("npx",), ("uv", "run"), ("poetry", "run"))
+RUNNER_PREFIXES = (("npx",), ("fvm",), ("uv", "run"), ("poetry", "run"))
 
 
 def is_test_file(path):
     parts = path.split("/")
     base = parts[-1]
-    return (bool(re.match(r"^test_.*\.py$|.*_test\.(py|go)$|.*\.(test|spec)\.[^.]+$", base))
+    return (bool(re.match(r"^test_.*\.py$|.*_test\.(py|go|dart)$|.*\.(test|spec)\.[^.]+$", base))
             or any(p in TEST_DIRS for p in parts[:-1]))
 
 
@@ -715,6 +735,8 @@ def suggest_targeted(command, test_paths):
         exts = (".py",)
     elif runner in ("jest", "vitest", "mocha"):
         exts = LANG_EXTS["js"]
+    elif runner in ("flutter test", "dart test"):
+        exts = (".dart",)
     elif runner == "go test":
         dirs = sorted({"./" + d + "/..." if d else "./..."
                        for d in (posixpath.dirname(p) for p in test_paths if p.endswith("_test.go"))})
@@ -800,6 +822,12 @@ def test_command(root):
         text = read_text(root, name)
         if text is not None and marker in text:
             return "pytest", name
+    pubspec = read_text(root, "pubspec.yaml")
+    if pubspec is not None:
+        flutter = re.search(r"^\s*(?:flutter_test:|sdk:\s*flutter\b)", pubspec, re.M)
+        fvm = "fvm " if any(os.path.isfile(os.path.join(root, f))
+                            for f in (".fvmrc", os.path.join(".fvm", "fvm_config.json"))) else ""
+        return fvm + ("flutter test" if flutter else "dart test"), "pubspec.yaml"
     for name, cmd in (("go.mod", "go test ./..."), ("Cargo.toml", "cargo test")):
         if os.path.isfile(os.path.join(root, name)):
             return cmd, name
