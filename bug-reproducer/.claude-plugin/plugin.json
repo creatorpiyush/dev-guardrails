@@ -1,0 +1,13 @@
+{
+  "name": "bug-reproducer",
+  "version": "1.0.0",
+  "description": "Fixes a reported bug test-first: writes the smallest failing test in your repo's style, confirms it fails for the reported reason, waits for your approval, then makes the minimal fix.",
+  "author": {
+    "name": "Piyush Anand",
+    "email": "piyushanand.1221@gmail.com"
+  },
+  "repository": "https://github.com/creatorpiyush/dev-guardrails",
+  "homepage": "https://github.com/creatorpiyush/dev-guardrails#readme",
+  "license": "MIT",
+  "keywords": ["bugs", "debugging", "tdd", "regression-test", "stack-trace"]
+}
