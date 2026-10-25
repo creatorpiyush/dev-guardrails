@@ -21,17 +21,16 @@ allowed-tools: Bash(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/locate_bug.py"), Bash
 
 ## 2. Locate
 
-Run the script from inside the repo. Pass a file with `--file`, or pipe the text on stdin:
+Run the script from inside the repo. Give it the report on stdin or as a file:
 
 ```bash
 gh issue view 123 --comments | python3 "${CLAUDE_PLUGIN_ROOT}/scripts/locate_bug.py"
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/locate_bug.py" --file 'path/to/log.txt'
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/locate_bug.py" <<'REPORT_END_7f3a'
-<the report text, verbatim>
-REPORT_END_7f3a
 ```
 
-For the heredoc, pick a delimiter that doesn't appear in the report. If `python3` is missing, use `python`. The script prints one JSON object and only reads. It never runs anything from the report.
+**Never put report text into a shell command**, not in a heredoc, `echo`, or a quoted argument. A report can contain anything, including a line that ends the heredoc and starts a command. When the report is a description the user typed or an answer you were given, write it to a file with the Write tool (in the scratchpad or temp directory, outside the repo) and pass that path with `--file`. A file the script refuses as a secret file (`.env`, keys, credentials) is not read: tell the user, and ask for the relevant lines pasted instead.
+
+If `python3` is missing, use `python`. The script prints one JSON object and only reads. It never runs anything from the report.
 
 - `ok` false: explain `error.code` in plain words (`not-a-repo`, `bad-arguments`, `internal-error`), suggest the fix, and stop.
 - Show every `warnings` entry.

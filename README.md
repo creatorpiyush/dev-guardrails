@@ -541,7 +541,7 @@ A script, [`scripts/locate_bug.py`](bug-reproducer/scripts/locate_bug.py), reads
 | Where it lives | Definitions of the named symbols, and lines that contain distinctive strings from the report, such as the fixed part of an error message. Capped at 10 hits each |
 | How to test it | The test command, conventions, and nearest existing tests for the candidate files, from a byte-identical copy of test-writer's [`detect_tests.py`](bug-reproducer/scripts/detect_tests.py) |
 
-Like test-writer, it never reads `.env`, key, or credential files.
+Like test-writer, it never reads `.env`, key, or credential files, and `--from-log` refuses them too. Lines over 4000 characters are cut. Claude never pastes report text into a shell command: it writes it to a file first.
 
 ### How Claude works through it
 

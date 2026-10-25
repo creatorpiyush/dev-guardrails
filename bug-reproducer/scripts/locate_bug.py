@@ -32,6 +32,7 @@ MAX_HITS = 10            # per symbol or string
 MAX_MATCHES = 5          # repo files one mentioned path can resolve to
 MAX_TARGETS = 10         # files passed to detect_tests.py
 MIN_TERM = 8             # shortest string worth searching for
+MAX_LINE = 4000          # characters kept per line; longer lines are minified output, not prose
 
 CONFIG_FILE = os.path.join(".claude", "bug-reproducer.json")
 DEFAULT_CONFIG = {"autoFix": False}
@@ -46,14 +47,14 @@ PATH_EXTS = sorted(set(EXT_LANG) | {".php", ".cs", ".c", ".h", ".cc", ".cpp", ".
                    key=len, reverse=True)
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-URL = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>()\"'`]+", re.I)
+URL = re.compile(r"(?<![\w+.-])[a-z][a-z0-9+.-]*://[^\s<>()\"'`]+", re.I)
 BLOB_URL = re.compile(r"/(?:-/)?blob/[^/\s]+/(?P<path>[^\s#?]+)(?:#L(?P<line>\d+))?")
 
 # Stack-trace frames, tried in this order on each line.
 PY_FRAME = re.compile(r'File "(?P<path>[^"]+)", line (?P<line>\d+)(?:, in (?P<func>\S+))?')
 JAVA_FRAME = re.compile(r"^\s*at\s+(?:[\w.$-]+/)?(?P<func>[\w$.<>]+)"
                         r"\((?P<path>[\w$-]+\.(?:java|kt|scala|groovy)):(?P<line>\d+)\)")
-RUBY_FRAME = re.compile(r"(?P<path>[^\s:'\"`]+\.rb):(?P<line>\d+):in\s+[`'](?P<func>[^'`]+)'")
+RUBY_FRAME = re.compile(r"(?<![^\s:'\"`])(?P<path>[^\s:'\"`]+\.rb):(?P<line>\d+):in\s+[`'](?P<func>[^'`]+)'")
 RUST_PANIC = re.compile(r"panicked at (?:'(?P<msg>[^']*)',\s*)?(?P<path>[^\s:'\"]+\.rs):(?P<line>\d+)")
 GO_FILE = re.compile(r"^\s+(?P<path>\S+\.go):(?P<line>\d+)(?:\s+\+0x[0-9a-f]+)?\s*$")
 GO_FUNC = re.compile(r"^(?P<func>[\w./*()\[\]-]+?)\([^()]*\)\s*$")
@@ -107,6 +108,8 @@ def parse_args(argv):
 def read_report(path, warnings):
     """Report text, ANSI-stripped. Raises ValueError for a missing or empty report."""
     if path and path != "-":
+        if dt.is_secret(path) or dt.is_secret(os.path.realpath(path)):
+            raise ValueError("%s looks like a secret file; it is never read" % path)
         try:
             size = os.path.getsize(path)
             with open(path, "rb") as f:
@@ -124,6 +127,10 @@ def read_report(path, warnings):
     text = ANSI.sub("", data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n"))
     if not text.strip():
         raise ValueError("the bug report is empty")
+    lines = text.split("\n")
+    if any(len(line) > MAX_LINE for line in lines):
+        warnings.append("lines over %d characters were cut" % MAX_LINE)
+        text = "\n".join(line[:MAX_LINE] for line in lines)
     return text
 
 
@@ -289,8 +296,9 @@ def unique(items):
 # ---------------------------------------------------------------- repo lookups
 
 class Index:
-    def __init__(self, repo):
+    def __init__(self, repo, skip=None):
         self.repo = repo
+        self.skip = skip  # the report file itself, so its own text isn't a "hit"
         self.by_name = {}
         for f in repo.files:
             self.by_name.setdefault(f.rsplit("/", 1)[-1], []).append(f)
@@ -313,7 +321,7 @@ class Index:
         """Lines containing term literally, in files Repo.read allows (never secret files)."""
         hits = []
         for f in self.repo.files[:dt.MAX_SCAN]:
-            text = self.repo.read(f)
+            text = None if f == self.skip else self.repo.read(f)
             if not text or term not in text:
                 continue
             for n, line in enumerate(text.split("\n"), 1):
@@ -325,7 +333,10 @@ class Index:
 
 
 def test_facts(root, targets, warnings):
-    result = dt.main([os.path.join(root, t) for t in targets])
+    try:
+        result = dt.main([os.path.join(root, t) for t in targets])
+    except Exception as e:  # keep the report facts even if test detection breaks
+        result = {"ok": False, "error": {"message": str(e)}, "warnings": []}
     for w in result.get("warnings", []):
         warnings.append("detect_tests: " + w)
     if not result.get("ok"):
@@ -351,7 +362,11 @@ def main(argv):
         return fail("not-a-repo", "Not inside a git repository.")
 
     repo = dt.Repo(root)
-    index = Index(repo)
+    skip = None
+    if args.file and args.file != "-":
+        rel = os.path.relpath(os.path.realpath(args.file), repo.real).replace(os.sep, "/")
+        skip = None if rel.startswith("../") else rel
+    index = Index(repo, skip)
     lines = text.split("\n")
 
     found_frames = frames(lines)

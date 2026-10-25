@@ -250,3 +250,63 @@ def test_config(repo, text, auto, warned):
     out = run(repo, "ValueError: x\n")
     assert out["config"] == {"autoFix": auto}
     assert any("bug-reproducer.json" in w for w in out["warnings"]) is warned
+
+
+# ---------------------------------------------------------------- hardening
+
+@pytest.mark.parametrize("token", ["a.", "x/", "[a-z]", "ab.rb"])
+def test_long_lines_do_not_hang(repo, token):
+    import time
+    start = time.time()
+    out = run(repo, (token * 3000 + "\n") * 60)
+    assert out["ok"]
+    assert time.time() - start < 20
+    assert any("were cut" in w for w in out["warnings"])
+
+
+def test_long_url_token_does_not_hang(repo):
+    import time
+    start = time.time()
+    run(repo, "a." * 100000 + "\n")
+    assert time.time() - start < 20
+
+
+@pytest.mark.parametrize("name", [".env", ".env.production", "server.pem", "id_rsa"])
+def test_secret_files_are_not_read(repo, tmp_path, name):
+    secret = tmp_path / name
+    secret.write_text('TOKEN="super-secret-token-value-1234"\n', encoding="utf-8")
+    out = run(repo, None, "--file", str(secret))
+    assert out["ok"] is False and out["error"]["code"] == "bad-arguments"
+    assert "super-secret" not in json.dumps(out)
+
+
+def test_symlink_to_secret_file_is_not_read(repo, tmp_path):
+    secret = tmp_path / ".env"
+    secret.write_text('TOKEN="super-secret-token-value-1234"\n', encoding="utf-8")
+    link = tmp_path / "ci.log"
+    try:
+        link.symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not available")
+    out = run(repo, None, "--file", str(link))
+    assert out["ok"] is False and "super-secret" not in json.dumps(out)
+
+
+def test_env_example_is_still_readable(repo, tmp_path):
+    example = tmp_path / ".env.example"
+    example.write_text("ValueError: placeholder\n", encoding="utf-8")
+    assert run(repo, None, "--file", str(example))["ok"]
+
+
+def test_report_file_inside_repo_is_not_a_grep_hit(repo):
+    write(repo, {"app/money.py": 'raise ValueError("amount must be positive")\n',
+                 "bug.log": "ValueError: amount must be positive\n"})
+    out = run(repo, None, "--file", str(repo / "bug.log"))
+    hits = next(g for g in out["grep"] if g["term"] == "amount must be positive")["hits"]
+    assert hits == [{"path": "app/money.py", "line": 1}]
+
+
+def test_skill_never_puts_report_in_a_heredoc():
+    skill = (SCRIPT.parents[1] / "skills" / "bug-reproducer" / "SKILL.md").read_text(encoding="utf-8")
+    assert "<<" not in skill and "REPORT_END" not in skill
+    assert "Never put report text into a shell command" in skill
