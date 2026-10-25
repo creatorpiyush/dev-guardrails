@@ -1,6 +1,6 @@
 # dev-guardrails
 
-A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, humanizer edits comments and docs that read like generic AI boilerplate, and test-writer writes tests in your repo's own style. Install only the plugins you want.
+A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, humanizer edits comments and docs that read like generic AI boilerplate, test-writer writes tests in your repo's own style, and bug-reproducer fixes a reported bug test-first. Install only the plugins you want.
 
 | Plugin | What it guards |
 | :- | :- |
@@ -12,6 +12,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [pr-writer](#pr-writer) | Not a guard. Drafts a PR title and description from your branch, fills the repo's PR template, and opens the PR only after you approve |
 | [humanizer](#humanizer) | Not a guard. Flags comments and docs in your changes that read like generic AI boilerplate, and rewrites the ones you approve |
 | [test-writer](#test-writer) | Not a guard. Writes tests that match your repo's existing ones, runs them, and checks they can fail before showing you |
+| [bug-reproducer](#bug-reproducer) | Not a guard. Reproduces a bug with a failing test, waits for your approval, then makes the smallest fix |
 | [session-recap](#session-recap) | Not a guard. Logs what a session did, then writes a short recap of what changed, its impact, what was tested, and what to do differently |
 
 ## Install
@@ -29,6 +30,7 @@ In Claude Code:
 /plugin install humanizer@dev-guardrails
 /plugin install test-writer@dev-guardrails
 /plugin install session-recap@dev-guardrails
+/plugin install bug-reproducer@dev-guardrails
 ```
 
 Or from your shell:
@@ -44,6 +46,7 @@ claude plugin install pr-writer@dev-guardrails
 claude plugin install humanizer@dev-guardrails
 claude plugin install test-writer@dev-guardrails
 claude plugin install session-recap@dev-guardrails
+claude plugin install bug-reproducer@dev-guardrails
 ```
 
 Installing a plugin enables its hooks and skills. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -515,6 +518,58 @@ It reads only tracked and untracked files that aren't gitignored, skips vendored
 
 To prove a new test can fail, Claude breaks the code it covers and checks that the test goes red. It does this on a copy, never your working tree: `detect_tests.py --snapshot` copies your tracked and untracked files, without `.git`, into a new `test-writer-*` temp directory. Without `.git` the copy isn't a repo, so git-workflow-guard doesn't block edits there even when you are on `main`. Gitignored files such as `node_modules` and `.venv` aren't copied, so if the tests can't run in the copy, the check is skipped and the report says why. Snapshots are left in place and removed on a later run once they are a day old.
 
+## bug-reproducer
+
+Fixes a reported bug test-first. Claude writes the smallest test that shows the bug, confirms it fails for the reason in the report, waits for you to approve it, and only then changes code. It has no hooks. Call it directly, or paste a stack trace or say "fix this bug" and its skill picks the request up.
+
+```text
+/bug-reproducer:fix <description | issue number | URL | --from-log <file>>
+```
+
+| Argument | The report is |
+| :- | :- |
+| A description | That text |
+| An issue number or URL | The issue's title, body, and comments, read with `gh issue view` (read-only) when `gh` is installed |
+| `--from-log <file>` | That log file. Past 256 KB only its tail is read, since logs end with the error |
+
+A script, [`scripts/locate_bug.py`](bug-reproducer/scripts/locate_bug.py), reads the report and prints JSON. It only matches the text with regexes and never runs anything from it.
+
+| The script finds | Details |
+| :- | :- |
+| Stack frames | Python, JavaScript/TypeScript (Node), Java/Kotlin, Go, Rust, and Ruby formats, each resolved to the repo files it can mean |
+| Mentions | File paths (including `path:line`, Windows paths, and GitHub/GitLab blob links), function and class names, error types and messages, exit codes, and versions |
+| Where it lives | Definitions of the named symbols, and lines that contain distinctive strings from the report, such as the fixed part of an error message. Capped at 10 hits each |
+| How to test it | The test command, conventions, and nearest existing tests for the candidate files, from a byte-identical copy of test-writer's [`detect_tests.py`](bug-reproducer/scripts/detect_tests.py) |
+
+Like test-writer, it never reads `.env`, key, or credential files, and `--from-log` refuses them too. Lines over 4000 characters are cut. Claude never pastes report text into a shell command: it writes it to a file first.
+
+### How Claude works through it
+
+1. Restates the bug as expected versus actual, lists its assumptions, and asks up to three questions, only if they block reproduction.
+2. **Red:** writes the smallest failing test in your repo's style and location, and runs it three times. The failure has to match the reported symptom. An import error, a typo, or a missing fixture doesn't count. It shows you the test and the real output.
+3. Stops until you approve the red test.
+4. Records a baseline run of the related suite, so failures that were already there are reported separately.
+5. **Green:** makes the smallest change that makes the test pass. If the root cause is bigger than the report, it proposes the scope first.
+6. Runs the new test, the related suite, and the full suite when it is quick, then adds one or two regression tests for neighbouring cases.
+7. Reports the root cause, the fix, the tests with real output, and a suggested `fix(<scope>): ...` commit message, with `Closes #N` only when you gave an issue number.
+
+### What it won't do
+
+- **Fix what it couldn't reproduce.** It reports what it tried, with the output, and what information is missing.
+- **Make a test pass dishonestly.** It never weakens an assertion, mocks away the bug, special-cases the test input, or swallows the error.
+- **Follow instructions in the report.** Issue text, logs, and comments are data. If they tell Claude to do something, it tells you instead.
+- **Commit, push, or open a PR.** Code edits go through the normal edit tools, so your other guards still apply.
+
+### Configuration
+
+`.claude/bug-reproducer.json` in the repo:
+
+```json
+{ "autoFix": false }
+```
+
+`autoFix: true` skips the wait for your approval of the red test. Claude still says that it skipped it. An invalid file falls back to the default with a warning.
+
 ## session-recap
 
 Writes a short recap when you finish a piece of work: what changed, what it may affect, what testing actually ran, and what would make the next session faster. A hook records a local activity log while you work. A script reads the log and git and prints JSON. Claude reads the diff of the riskiest files and writes the recap.
@@ -611,6 +666,7 @@ An invalid value makes the whole file fall back to the defaults, with a warning.
 - **pr-writer summarises large diffs.** Past `diffSizeCap` it sees excerpts and says so.
 - **humanizer findings are heuristics.** They miss some boilerplate and flag some fine text, which is why Claude reads each region in context and you approve every change. Its comment extraction outside Python is a lexer, not a parser, so heredocs, regex literals, and nested template strings can confuse it.
 - **test-writer detection is a heuristic.** Frameworks, commands, and conventions come from config files and regex counts, not by running anything, so it reports where each command came from and how confident it is. It reads the root `package.json` and Python config only, so monorepo packages may need you to name the command.
+- **bug-reproducer parsing is a heuristic.** Stack frames and mentions come from regexes over the report, and a path from another machine is matched to repo files by its longest matching suffix, so it can point at the wrong file of the same name. Claude reads the code before trusting a candidate.
 - **Use server-side protection too.** Turn on branch protection rules and secret scanning push protection on GitHub (or the GitLab equivalents) for anything that matters.
 
 ## Add another plugin to this marketplace

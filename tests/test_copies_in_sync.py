@@ -131,3 +131,9 @@ COLLECT_RECAP = ROOT / "session-recap" / "scripts" / "collect_recap.py"
 @pytest.mark.parametrize("name", ["log_dir", "safe_session"])
 def test_log_paths_copied_to_collect_recap(name):
     assert definition(LOG_ACTIVITY, name) == definition(COLLECT_RECAP, name)
+
+
+def test_detect_tests_copied_to_bug_reproducer():
+    original = ROOT / "test-writer" / "scripts" / "detect_tests.py"
+    copy = ROOT / "bug-reproducer" / "scripts" / "detect_tests.py"
+    assert original.read_bytes() == copy.read_bytes()
