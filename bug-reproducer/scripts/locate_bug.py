@@ -40,7 +40,7 @@ DEFAULT_CONFIG = {"autoFix": False}
 EXT_LANG = {".py": "python", ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
             ".jsx": "javascript", ".ts": "typescript", ".tsx": "typescript", ".java": "java",
             ".kt": "kotlin", ".scala": "scala", ".groovy": "groovy", ".go": "go", ".rs": "rust",
-            ".rb": "ruby"}
+            ".rb": "ruby", ".dart": "dart"}
 PATH_EXTS = sorted(set(EXT_LANG) | {".php", ".cs", ".c", ".h", ".cc", ".cpp", ".hpp", ".swift",
                                     ".json", ".yml", ".yaml", ".toml", ".ini", ".cfg", ".sh",
                                     ".sql", ".html", ".css", ".vue", ".svelte"},
@@ -55,6 +55,7 @@ PY_FRAME = re.compile(r'File "(?P<path>[^"]+)", line (?P<line>\d+)(?:, in (?P<fu
 JAVA_FRAME = re.compile(r"^\s*at\s+(?:[\w.$-]+/)?(?P<func>[\w$.<>]+)"
                         r"\((?P<path>[\w$-]+\.(?:java|kt|scala|groovy)):(?P<line>\d+)\)")
 RUBY_FRAME = re.compile(r"(?<![^\s:'\"`])(?P<path>[^\s:'\"`]+\.rb):(?P<line>\d+):in\s+[`'](?P<func>[^'`]+)'")
+DART_FRAME = re.compile(r"^\s*#\d+\s+(?P<func>.+?)\s+\((?P<path>[^()\s]+?):(?P<line>\d+)(?::\d+)?\)\s*$")
 RUST_PANIC = re.compile(r"panicked at (?:'(?P<msg>[^']*)',\s*)?(?P<path>[^\s:'\"]+\.rs):(?P<line>\d+)")
 GO_FILE = re.compile(r"^\s+(?P<path>\S+\.go):(?P<line>\d+)(?:\s+\+0x[0-9a-f]+)?\s*$")
 GO_FUNC = re.compile(r"^(?P<func>[\w./*()\[\]-]+?)\([^()]*\)\s*$")
@@ -63,6 +64,7 @@ AT_FRAME = re.compile(r"^\s*at\s+(?:(?P<func>[^()]+?)\s+\()?(?P<path>(?:file://)
 RUST_FUNC = re.compile(r"^\s*\d+:\s+(?:0x[0-9a-f]+\s+-\s+)?(?P<func>\S+)\s*$")
 
 ERRORS = (
+    re.compile(r"The following (?P<type>[A-Za-z_]\w*) was thrown[^\n]*$"),
     re.compile(r":in\s+[`'][^']*':\s*(?P<message>.+?)\s+\((?P<type>[A-Z][\w:]*)\)\s*$"),
     re.compile(r"(?:^|\s)(?:[\w$]+\.)*(?P<type>[A-Z][\w$]*(?:Error|Exception|Exit|Interrupt|Failure))"
                r"(?::\s*(?P<message>.+?))?\s*$"),
@@ -154,6 +156,13 @@ def load_config(root, warnings):
 
 # ---------------------------------------------------------------- parsing
 
+def dart_path(uri):
+    """package:app/src/a.dart -> lib/src/a.dart; file:///x/a.dart -> /x/a.dart; dart:core/a.dart stays."""
+    if uri.startswith("package:") and "/" in uri:
+        return "lib/" + uri[8:].split("/", 1)[1]
+    return uri[7:] if uri.startswith("file://") else uri
+
+
 def lang_of(path, default=None):
     return EXT_LANG.get(os.path.splitext(path)[1].lower(), default)
 
@@ -176,6 +185,9 @@ def frames(lines):
         elif RUBY_FRAME.search(line):
             m = RUBY_FRAME.search(line)
             frame = ("ruby", m["path"], m["line"], m["func"])
+        elif DART_FRAME.match(line):
+            m = DART_FRAME.match(line)
+            frame = ("dart", dart_path(m["path"]), m["line"], m["func"])
         elif RUST_PANIC.search(line):
             m = RUST_PANIC.search(line)
             frame = ("rust", m["path"], m["line"], None)
@@ -216,10 +228,7 @@ def errors(lines):
     for i, line in enumerate(lines):
         m = RUST_PANIC.search(line)
         if m:
-            message = m["msg"]
-            if message is None and line.rstrip().endswith(":") and i + 1 < len(lines):
-                message = lines[i + 1].strip() or None
-            item = {"type": "panic", "message": message}
+            item = {"type": "panic", "message": m["msg"]}
         else:
             for rx in ERRORS:
                 m = rx.search(line)
@@ -229,6 +238,8 @@ def errors(lines):
                     break
             else:
                 continue
+        if item["message"] is None and line.rstrip().endswith(":") and i + 1 < len(lines):
+            item["message"] = lines[i + 1].strip() or None  # Rust panics and Flutter put it on the next line
         key = (item["type"], item["message"])
         if key not in seen:
             seen.add(key)

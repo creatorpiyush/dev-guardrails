@@ -65,6 +65,14 @@ main.(*Server).handle(0xc000010000)
     "rust": ("src/ledger.rs", """thread 'main' panicked at src/ledger.rs:5:9:
 attempt to subtract with overflow
 """, 5, None),
+    "dart": ("lib/src/cart.dart", """══╡ EXCEPTION CAUGHT BY FLUTTER TEST FRAMEWORK ╞════
+The following _TypeError was thrown building CartView(dirty):
+type 'Null' is not a subtype of type 'int'
+
+#0      Cart.add (package:shop/src/cart.dart:5:30)
+#1      main.<anonymous closure> (file:///home/u/shop/test/cart_test.dart:12:9)
+#2      _rootRun (dart:async/zone.dart:1399:13)
+""", 5, "Cart.add"),
     "ruby": ("app/models/user.rb", """app/models/user.rb:12:in 'User#save': undefined method 'name' for nil (NoMethodError)
 \tfrom app/controllers/users_controller.rb:7:in 'block in create'
 """, 12, "User#save"),
@@ -310,3 +318,32 @@ def test_skill_never_puts_report_in_a_heredoc():
     skill = (SCRIPT.parents[1] / "skills" / "bug-reproducer" / "SKILL.md").read_text(encoding="utf-8")
     assert "<<" not in skill and "REPORT_END" not in skill
     assert "Never put report text into a shell command" in skill
+
+
+# ---------------------------------------------------------------- dart and flutter
+
+def test_dart_frames_resolve_package_file_and_sdk_uris(repo):
+    write(repo, {"lib/src/cart.dart": "class Cart {}\n", "test/cart_test.dart": "void main() {}\n"})
+    out = run(repo, TRACES["dart"][1])
+    got = [(f["path"], f["line"], f["repo_paths"]) for f in out["frames"]]
+    assert got == [("lib/src/cart.dart", 5, ["lib/src/cart.dart"]),
+                   ("/home/u/shop/test/cart_test.dart", 12, ["test/cart_test.dart"]),
+                   ("dart:async/zone.dart", 1399, [])]
+    assert [f["function"] for f in out["frames"]] == ["Cart.add", "main.<anonymous closure>", "_rootRun"]
+
+
+def test_flutter_error_message_comes_from_the_next_line(repo):
+    out = run(repo, TRACES["dart"][1])
+    assert {"type": "_TypeError", "message": "type 'Null' is not a subtype of type 'int'"} in out["errors"]
+
+
+def test_dart_symbols_and_test_command(repo):
+    write(repo, {"pubspec.yaml": "dependencies:\n  flutter:\n    sdk: flutter\ndev_dependencies:\n"
+                                 "  flutter_test:\n    sdk: flutter\n",
+                 "lib/src/cart.dart": "class Cart {\n  void add(int x) {}\n}\n",
+                 "test/cart_test.dart": "import 'package:shop/src/cart.dart';\nvoid main() {\n  Cart();\n}\n"})
+    out = run(repo, TRACES["dart"][1])
+    defs = {s["name"]: s["definitions"] for s in out["symbols"]}
+    assert defs["Cart"] == [{"path": "lib/src/cart.dart", "line": 1}]
+    assert out["tests"]["commands"][0]["run"] == "flutter test"
+    assert out["tests"]["targets"][0]["existing_tests"] == ["test/cart_test.dart"]

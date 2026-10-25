@@ -450,6 +450,13 @@ OUTPUTS = [
      (2, 1, 1, 4, ["Suite › does x"])),
     ("vitest", " FAIL  src/a.test.ts > suite > t\n\n Tests  1 failed | 2 passed (3)\n",
      (2, 1, 0, 3, ["src/a.test.ts > suite > t"])),
+    ("dart test", "00:01 +0: loading test/a_test.dart\n00:02 +3 ~1 -1: test/a_test.dart: Cart adds [E]\n"
+                  "00:03 +3 ~1 -1: Some tests failed.\n",
+     (3, 1, 1, 5, ["test/a_test.dart: Cart adds"])),
+    ("dart test", "00:05 +12: All tests passed!\n", (12, 0, 0, 12, [])),
+    ("dart test", '00:01 +0 -1: loading test/b_test.dart [E]\n  Failed to load "test/b_test.dart": Compilation failed\n'
+                  "00:01 +0 -1: Some tests failed.\n",
+     (0, 1, 0, 1, ["loading test/b_test.dart", "load: test/b_test.dart"])),
     ("go test", "--- FAIL: TestX (0.00s)\n    --- FAIL: TestX/sub (0.00s)\nFAIL\nFAIL\texample.com/pkg\t0.01s\n",
      (None, 2, None, None, ["TestX", "TestX/sub"])),
     ("go test", "FAIL\texample.com/pkg [build failed]\n", (None, 1, None, None, ["example.com/pkg [build failed]"])),
@@ -503,3 +510,14 @@ def test_unclosed_cobertura_classes_are_read_quickly():
     start = time.time()
     entries = load().parse_cobertura(text)
     assert len(entries) == 20000 and time.time() - start < 5
+
+
+def test_check_on_a_flutter_package(repo):
+    write(repo, {"pubspec.yaml": "dependencies:\n  flutter:\n    sdk: flutter\ndev_dependencies:\n"
+                                 "  flutter_test:\n    sdk: flutter\n",
+                 "lib/src/cart.dart": "class Cart {\n  void add(int x) {}\n}\n\nint total(List<int> xs) => 0;\n",
+                 "lib/src/tax.dart": "double tax(double x) {\n  return x;\n}\n",
+                 "test/cart_test.dart": "import 'package:shop/src/cart.dart';\nvoid main() {\n  Cart();\n  total([]);\n}\n"})
+    covered = gate(repo, "check", "lib/src/cart.dart")
+    assert covered["verdict"] == "covered" and covered["command"]["run"] == "flutter test"
+    assert gate(repo, "check", "lib/src/tax.dart")["verdict"] == "uncovered"

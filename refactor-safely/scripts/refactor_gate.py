@@ -426,6 +426,20 @@ def read_vitest(t):
                   [x.strip() for x in re.findall(r"^[ \t]*(?:FAIL|×)\s+(.+?)\s*$", t, re.M)])
 
 
+DART_PROGRESS = re.compile(r"^(?:\d+:)+\d+ \+(\d+)(?: ~(\d+))?(?: -(\d+))?: ", re.M)
+
+
+def read_dart(t):
+    """`dart test` and `flutter test`: the last progress line is the running total."""
+    rows = DART_PROGRESS.findall(t)
+    if not rows:
+        return None
+    passed, skipped, failed = (int(x or 0) for x in rows[-1])
+    names = re.findall(r"^(?:\d+:)+\d+ \+\d+(?: ~\d+)?(?: -\d+)?: (.+?) \[E\]\s*$", t, re.M)
+    names += ["load: " + x for x in re.findall(r'^[ \t]*Failed to load "([^"]+)"', t, re.M)]
+    return counts("dart test", passed, failed, skipped, passed + skipped + failed, names)
+
+
 def read_go(t):
     if not re.search(r"^(?:ok|FAIL)\s+\S+\s+(?:[\d.]+s|\(cached\)|\[)|^[ \t]*--- (?:FAIL|PASS):", t, re.M):
         return None
@@ -510,7 +524,7 @@ def read_dotnet(t):
     return counts("dotnet test", passed, failed, skipped, total, re.findall(r"^[ \t]+Failed (\S+)", t, re.M))
 
 
-READERS = (read_pytest, read_unittest, read_jest, read_vitest, read_go, read_cargo, read_mocha,
+READERS = (read_pytest, read_unittest, read_jest, read_vitest, read_dart, read_go, read_cargo, read_mocha,
            read_rspec, read_maven, read_gradle, read_phpunit, read_dotnet)
 
 

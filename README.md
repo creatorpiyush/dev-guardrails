@@ -499,9 +499,9 @@ A script, [`scripts/detect_tests.py`](test-writer/scripts/detect_tests.py), gath
 
 | The script finds | Details |
 | :- | :- |
-| Framework | pytest, unittest, jest, vitest, mocha, go test, cargo test, JUnit (Maven or Gradle), rspec, phpunit, dotnet test |
+| Framework | pytest, unittest, jest, vitest, mocha, go test, cargo test, JUnit (Maven or Gradle), rspec, phpunit, dotnet test, flutter test, dart test |
 | Commands | The suite command and where it came from, in this order of trust: `package.json` scripts, `Makefile`/`justfile` targets, pytest config and `tox.ini`, CI workflow steps. Without any, the framework default, marked low confidence. Also templates for running one file or one test |
-| Conventions | For Python and JavaScript/TypeScript: test directories, file naming, test naming, fixtures, mocking libraries, assertion style, parametrization, setup and teardown, and arrange-act-assert comments, counted over up to 50 test files. Other languages report `unknown` and rely on exemplars |
+| Conventions | For Python, JavaScript/TypeScript, and Dart: test directories, file naming, test naming, fixtures, mocking libraries, assertion style, parametrization, setup and teardown, and arrange-act-assert comments, counted over up to 50 test files. Other languages report `unknown` and rely on exemplars |
 | Exemplars | The 3 nearest existing tests for each target: same stem, imports the target, names the file, mirrored path, same directory, shared imports |
 | Coverage by name | The target's public symbols, and which ones its existing tests mention |
 | Coverage tools | `pytest-cov`, `coverage.py`, `c8`, `nyc`, `@vitest/coverage-*`, jest and go built-ins, jacoco, coverlet, and any existing report file |
@@ -539,7 +539,7 @@ A script, [`scripts/locate_bug.py`](bug-reproducer/scripts/locate_bug.py), reads
 
 | The script finds | Details |
 | :- | :- |
-| Stack frames | Python, JavaScript/TypeScript (Node), Java/Kotlin, Go, Rust, and Ruby formats, each resolved to the repo files it can mean |
+| Stack frames | Python, JavaScript/TypeScript (Node), Java/Kotlin, Go, Rust, Ruby, and Dart/Flutter formats, each resolved to the repo files it can mean |
 | Mentions | File paths (including `path:line`, Windows paths, and GitHub/GitLab blob links), function and class names, error types and messages, exit codes, and versions |
 | Where it lives | Definitions of the named symbols, and lines that contain distinctive strings from the report, such as the fixed part of an error message. Capped at 10 hits each |
 | How to test it | The test command, conventions, and nearest existing tests for the candidate files, from a byte-identical copy of test-writer's [`detect_tests.py`](bug-reproducer/scripts/detect_tests.py) |
@@ -606,7 +606,7 @@ It stops, and tells you, when tests are flaky or too slow to run per step (it of
 
 ### What it reads from test output
 
-`step` compares failing test names, so it recognises the summary of pytest, unittest, jest, vitest, mocha, `go test`, `cargo test`, JUnit (Maven and Gradle), rspec, phpunit, and `dotnet test`. For anything else it falls back to the exit code and says so.
+`step` compares failing test names, so it recognises the summary of pytest, unittest, jest, vitest, mocha, `go test`, `cargo test`, JUnit (Maven and Gradle), rspec, phpunit, `dotnet test`, and `flutter test`/`dart test`. For anything else it falls back to the exit code and says so.
 
 ### What it won't do
 

@@ -81,6 +81,9 @@ FRAMEWORK_FIXTURES = {
     "rspec": {".rspec": "--require spec_helper\n"},
     "phpunit": {"phpunit.xml": "<phpunit/>\n"},
     "dotnet test": {"T.Tests/T.Tests.csproj": '<PackageReference Include="xunit" />\n'},
+    "flutter test": {"pubspec.yaml": "dependencies:\n  flutter:\n    sdk: flutter\ndev_dependencies:\n"
+                                     "  flutter_test:\n    sdk: flutter\n"},
+    "dart test": {"pubspec.yaml": "name: x\ndev_dependencies:\n  test: ^1.24.0\n"},
 }
 
 
@@ -456,3 +459,152 @@ def test_malformed_package_json(repo):
 def test_empty_repo(repo):
     out = run(repo)
     assert out["ok"] and out["targets"] == [] and out["conventions"] == {}
+
+
+# ---------------------------------------------------------------- dart and flutter
+
+CART_DART = """import 'package:flutter/material.dart';
+
+abstract class Pricing {}
+
+class Cart {
+  final List<int> items = [];
+  void add(int x) => items.add(x);
+}
+
+enum Mode { a, b }
+
+mixin Logging {}
+
+typedef Total = int Function(List<int>);
+
+int total(List<int> xs) {
+  return xs.fold(0, (a, b) => a + b);
+}
+
+Future<void> load(String id) async {
+  return;
+}
+
+String _hidden() => 'x';
+
+class CartView extends StatelessWidget {
+  Widget build(BuildContext context) => const Placeholder();
+}
+"""
+CART_TEST = """import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:shop/src/cart.dart';
+
+void main() {
+  group('Cart', () {
+    setUp(() {});
+    test('adds', () {
+      expect(total([1]), 1);
+    });
+    testWidgets('renders', (tester) async {
+      await tester.pumpWidget(CartView());
+      expect(find.byType(CartView), findsOneWidget);
+    });
+  });
+  print(Cart);
+}
+"""
+FLUTTER_PUBSPEC = ("name: shop\ndependencies:\n  flutter:\n    sdk: flutter\ndev_dependencies:\n"
+                   "  flutter_test:\n    sdk: flutter\n")
+
+
+def flutter_repo(repo):
+    return make(repo, {"pubspec.yaml": FLUTTER_PUBSPEC, "lib/src/cart.dart": CART_DART,
+                       "test/cart_test.dart": CART_TEST})
+
+
+def test_dart_public_symbols_skip_private_names(repo):
+    out = run(flutter_repo(repo), "lib/src/cart.dart")
+    target = out["targets"][0]
+    assert target["language"] == "dart"
+    assert target["public_symbols"] == ["Pricing", "Cart", "Mode", "Logging", "CartView", "Total",
+                                        "total", "load"]
+
+
+def test_dart_test_files_and_package_imports(repo):
+    out = run(flutter_repo(repo), "lib/src/cart.dart")
+    target = out["targets"][0]
+    assert target["existing_tests"] == ["test/cart_test.dart"]
+    assert target["exemplars"][0] == {"path": "test/cart_test.dart", "reason": "same stem"}
+    assert set(target["tested_symbols"]) == {"Cart", "CartView", "total"}
+    assert "load" in target["untested_symbols"] and "Mode" in target["untested_symbols"]
+
+
+def test_dart_test_found_by_package_import_alone(repo):
+    out = run(make(repo, {
+        "pubspec.yaml": FLUTTER_PUBSPEC, "lib/src/cart.dart": CART_DART,
+        "test/checkout_test.dart": "import 'package:shop/src/cart.dart';\nvoid main() {\n  Cart();\n}\n"}),
+        "lib/src/cart.dart")
+    assert out["targets"][0]["existing_tests"] == ["test/checkout_test.dart"]
+
+
+def test_dart_test_found_by_relative_import(repo):
+    out = run(make(repo, {
+        "pubspec.yaml": FLUTTER_PUBSPEC, "lib/src/cart.dart": CART_DART,
+        "lib/src/cart_widget_test.dart": "import 'cart.dart';\nvoid main() {\n  Cart();\n}\n"}),
+        "lib/src/cart.dart")
+    assert out["targets"][0]["existing_tests"] == ["lib/src/cart_widget_test.dart"]
+
+
+def test_flutter_command_and_templates(repo):
+    out = run(flutter_repo(repo))
+    c = command(out, "flutter test")
+    assert (c["run"], c["confidence"]) == ("flutter test", "low")
+    assert c["file"] == "flutter test {file}"
+    assert c["single"] == "flutter test {file} --plain-name '{name}'"
+
+
+def test_flutter_command_from_ci_beats_default(repo):
+    out = run(make(repo, {"pubspec.yaml": FLUTTER_PUBSPEC,
+                          ".github/workflows/ci.yml": "steps:\n  - run: fvm flutter test --coverage\n"}))
+    c = command(out, "flutter test")
+    assert (c["run"], c["source"]) == ("fvm flutter test --coverage", ".github/workflows/ci.yml")
+
+
+def test_dart_framework_from_test_imports_only(repo):
+    out = run(make(repo, {"test/a_test.dart": "import 'package:test/test.dart';\nvoid main() {}\n"}))
+    assert names(out) == ["dart test"]
+    out = run(make(repo, {"test/b_test.dart": "import 'package:flutter_test/flutter_test.dart';\nvoid main() {}\n"}))
+    assert "flutter test" in names(out)
+
+
+def test_dart_conventions(repo):
+    out = run(flutter_repo(repo))
+    info = out["conventions"]["dart"]
+    assert info["file_patterns"] == {"*_test.dart": 1, "test/": 1}
+    assert info["naming"] == {"test()": 1, "testWidgets()": 1, "group()": 1}
+    assert info["mocking"] == {"mocktail": 1}
+    assert info["assertions"] == {"expect()": 1, "find.* finders": 1}
+    assert info["setup"] == {"setUp/tearDown": 1, "pumpWidget": 1}
+
+
+def test_dart_symbol_lookup(repo):
+    flutter_repo(repo)
+    for symbol, line in (("Cart", 5), ("total", 16), ("load", 20), ("Mode", 10), ("Logging", 12), ("Total", 14)):
+        out = run(repo, symbol)
+        assert (out["targets"][0]["path"], out["targets"][0]["line"]) == ("lib/src/cart.dart", line), symbol
+
+
+def test_dart_generated_and_tool_files_are_skipped(repo):
+    out = run(make(repo, {"pubspec.yaml": FLUTTER_PUBSPEC, "lib/src/cart.dart": CART_DART,
+                          "lib/src/cart.g.dart": "class Gen {}\n", "lib/a.freezed.dart": "class F {}\n",
+                          "test/cart.mocks.dart": "class M {}\n", ".dart_tool/x.dart": "class T {}\n"}),
+              "lib")
+    assert [t["path"] for t in out["targets"]] == ["lib/src/cart.dart"]
+
+
+def test_flutter_coverage_tool_and_services(repo):
+    out = run(make(repo, {"pubspec.yaml": FLUTTER_PUBSPEC, "lib/src/cart.dart": CART_DART,
+                          "lib/src/api.dart": "import 'package:dio/dio.dart';\nimport 'package:sqflite/sqflite.dart';\n"
+                                              "class Api {}\n",
+                          "coverage/lcov.info": "SF:lib/src/cart.dart\nend_of_record\n"}),
+              "lib/src/api.dart")
+    assert "flutter test --coverage (built in)" in out["coverage"]["tools"]
+    assert out["coverage"]["reports"] == ["coverage/lcov.info"]
+    assert {s["kind"] for s in out["services"]} == {"database", "network"}
