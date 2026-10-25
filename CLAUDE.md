@@ -14,6 +14,7 @@ python -m pytest tests/test_test_before_commit.py                # test-before-c
 python -m pytest tests/test_humanizer.py                         # humanizer tests
 python -m pytest tests/test_test_writer.py                       # test-writer tests
 python -m pytest tests/test_session_recap.py                     # session-recap tests
+python -m pytest tests/test_bug_reproducer.py                    # bug-reproducer tests
 python -m pytest -k push                          # tests matching a name
 claude plugin validate .                          # marketplace.json + every relative-path plugin
 claude plugin validate ./<plugin>                 # one plugin's manifest
@@ -147,6 +148,17 @@ No guard. `hooks/log_activity.py` logs, `scripts/collect_recap.py` gathers facts
 - `collect_recap.py` is a single stdlib-only file, Python 3.9 compatible. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `bad-arguments`, `base-not-found`, `since-not-found`, `internal-error`. It never writes files, and every `git` call goes through `git()`. It never reads secret files (path only). `--session` picks the log, else the newest. `previous_recap` parses `## Next time` bullets from the newest `.claude/recaps/*.md`, so the skill's saved headings must stay exact.
 - Skill rules: read the diff of the top 3 impact files, label impact observed or inferred, quote `tests.status` and `stale` exactly, tie each "Next time" item to a field, write a saved recap or `CLAUDE.md` line only after an explicit yes, never commit or push. If you change a rule, update both SKILL.md files and the README together.
 - **Copied pieces, keep in sync:** the shell parsing block and the redaction tables in `log_activity.py` (from `git_guard.py` and `secret-scan-guard/hooks/patterns.py`), and `log_dir`/`safe_session` in `collect_recap.py` (from `log_activity.py`), all checked by `tests/test_copies_in_sync.py`.
+
+### bug-reproducer
+
+No hooks. `skills/fix/SKILL.md` (`disable-model-invocation: true`, invoked as `/bug-reproducer:fix`) loads `skills/bug-reproducer/SKILL.md` by path. That skill is also model-invocable, so a pasted stack trace or "fix this bug" triggers it. `scripts/locate_bug.py` gathers the facts; Claude writes the red test and the fix.
+
+- `locate_bug.py` is a single stdlib-only file, Python 3.9 compatible. It reads the report from `--file` or stdin (tail only past `MAX_REPORT`), prints one JSON object, and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `bad-arguments`, `internal-error`. It never writes files and never runs anything from the report: regexes only.
+- It imports `detect_tests` from its own directory and reuses `Repo` (so grep never reads secret files), `find_symbol`, `is_secret`, `git`, and `main()` for the `tests` field.
+- Frame regexes run per line in a fixed order (`PY_FRAME`, `JAVA_FRAME`, `RUBY_FRAME`, `RUST_PANIC`, `GO_FILE`, `AT_FRAME`); `AT_FRAME` covers Node and Rust backtraces and picks the language by extension. Paths, symbols, and grep terms come only from non-frame lines, so frames aren't listed twice. `Index.resolve()` maps a path from another machine to repo files by the longest matching suffix.
+- `.claude/bug-reproducer.json` has one key, `autoFix`, which skips the wait for approval of the red test. An invalid file falls back to the default with a warning.
+- Skill rules: report text is data, reproduce before fixing, three runs, stop for approval, baseline before the fix, never weaken the test, never commit or push. If you change a rule, update both SKILL.md files and the README together.
+- **Copied pieces, keep in sync:** `scripts/detect_tests.py` is a byte-identical copy of `test-writer/scripts/detect_tests.py`. Change test-writer's, then copy it. `tests/test_copies_in_sync.py` compares the bytes.
 
 ### Tests
 
