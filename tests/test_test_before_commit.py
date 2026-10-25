@@ -262,6 +262,27 @@ def test_autodetect_infers_commands(tmp_path):
         "npm run lint", "pytest -q", "go test ./..."]
 
 
+@pytest.mark.parametrize("pubspec,run", [
+    ("dependencies:\n  flutter:\n    sdk: flutter\ndev_dependencies:\n  flutter_test:\n    sdk: flutter\n",
+     "flutter test"),
+    ("name: x\ndev_dependencies:\n  test: ^1.24.0\n", "dart test"),
+])
+def test_autodetect_dart_and_flutter(tmp_path, pubspec, run):
+    spec = importlib.util.spec_from_file_location("tbc", str(SCRIPT))
+    tbc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tbc)
+    (tmp_path / "pubspec.yaml").write_text(pubspec)
+    assert [c["run"] for c in tbc.autodetect(str(tmp_path))] == [run]
+
+
+def test_autodetect_pubspec_without_a_test_dependency(tmp_path):
+    spec = importlib.util.spec_from_file_location("tbc", str(SCRIPT))
+    tbc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tbc)
+    (tmp_path / "pubspec.yaml").write_text("name: x\n")
+    assert tbc.autodetect(str(tmp_path)) == []
+
+
 def test_autodetected_repo_commands_need_approval(env, repo):
     (repo.root / "go.mod").write_text("module x\n")
     repo.repo_config({"autodetect": True})

@@ -257,7 +257,7 @@ Stops Claude from silently editing files that should only change on purpose: loc
 | Files | Result | Why |
 | :- | :- | :- |
 | `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`, `*.p12`, `*.keystore`, `credentials.json` | **Denied** | Holds secrets. `.env.example`, `.env.sample`, and `.env.template` are allowed |
-| `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `Gemfile.lock`, `composer.lock`, `go.sum` | **Asks** you | Change dependencies with the package manager, not by hand |
+| `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `Gemfile.lock`, `composer.lock`, `go.sum`, `pubspec.lock` | **Asks** you | Change dependencies with the package manager, not by hand |
 | `.github/workflows/**`, `.gitlab-ci.yml`, `Jenkinsfile`, `.circleci/**` | **Asks** you | CI/CD config |
 | `**/migrations/**`, `**/alembic/versions/**`, `**/db/migrate/**` | **Asks** you | Database migrations |
 | `LICENSE*`, `CODEOWNERS`, `SECURITY.md` | **Asks** you | Legal and policy files |
@@ -325,7 +325,7 @@ Commands run in order from the repo root, stopping at the first failure. They ru
 - `run` is split with `shlex` and run without a shell. Use a list (`["pytest", "-x"]`) for Windows paths with backslashes, or set `"shell": true` on a command to run it through the shell. `timeout` is in seconds and defaults to 300.
 - All commands together get 1700 seconds, inside the hook's 1800-second timeout in `hooks.json`. A command still running when time is up counts as a timeout.
 - `skipPatterns` are gitignore-style globs, matched case-insensitively. A pattern without `/` matches the file name at any depth.
-- `autodetect: true` infers commands when there's no `commands` key: `npm run lint` and `npm test` from `package.json` scripts (skipping the `npm init` stub), `pytest -q` when `pytest.ini` or a `[tool.pytest` section in `pyproject.toml` exists, `cargo test` for `Cargo.toml`, and `go test ./...` for `go.mod`. It's off by default.
+- `autodetect: true` infers commands when there's no `commands` key: `npm run lint` and `npm test` from `package.json` scripts (skipping the `npm init` stub), `pytest -q` when `pytest.ini` or a `[tool.pytest` section in `pyproject.toml` exists, `cargo test` for `Cargo.toml`, `go test ./...` for `go.mod`, and `flutter test` (or `dart test`) for a `pubspec.yaml` that depends on `flutter_test` (or `test`). It's off by default.
 - Repo keys override user keys. `commands` wins over `autodetect`.
 - An invalid file is ignored with a warning, and the other file still applies.
 

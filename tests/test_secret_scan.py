@@ -157,7 +157,7 @@ def test_placeholders_and_clean_content_allowed(repo, hook, content):
     assert allowed(hook(write(repo / "a.py", content)))
 
 
-@pytest.mark.parametrize("name", ["package-lock.json", "yarn.lock", "go.sum", "dist/app.min.js", "app.js.map"])
+@pytest.mark.parametrize("name", ["package-lock.json", "yarn.lock", "go.sum", "pubspec.lock", "dist/app.min.js", "app.js.map"])
 def test_lockfiles_and_minified_skipped(repo, hook, name):
     assert allowed(hook(write(repo / name, AWS_KEY)))
 

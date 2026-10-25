@@ -323,6 +323,16 @@ def autodetect(root):
         pytest_section = False
     if pytest_section or os.path.isfile(os.path.join(root, "pytest.ini")):
         found.append({"name": "pytest", "run": "pytest -q"})
+    try:
+        with open(os.path.join(root, "pubspec.yaml"), encoding="utf-8") as f:
+            pubspec = f.read()
+    except (OSError, ValueError):
+        pubspec = None
+    if pubspec is not None:
+        if re.search(r"^\s*(?:flutter_test:|sdk:\s*flutter\b)", pubspec, re.M):
+            found.append({"name": "flutter test", "run": "flutter test"})
+        elif re.search(r"^\s*test:", pubspec, re.M):
+            found.append({"name": "dart test", "run": "dart test"})
     if os.path.isfile(os.path.join(root, "Cargo.toml")):
         found.append({"name": "cargo test", "run": "cargo test"})
     if os.path.isfile(os.path.join(root, "go.mod")):

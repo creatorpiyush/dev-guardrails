@@ -229,35 +229,39 @@ KIND_RULES = [
         "pytest", "py.test", "tox", "nox", "jest", "vitest", "mocha", "go test",
         "cargo test", "npm test", "npm run test", "yarn test", "yarn run test",
         "pnpm test", "pnpm run test", "bun test", "rspec", "bundle exec rspec",
-        "bundle exec rake test", "phpunit", "dotnet test", "make test", "unittest"))),
+        "bundle exec rake test", "phpunit", "dotnet test", "make test", "unittest",
+        "flutter test", "dart test"))),
     ("typecheck", tuple(_rules(
-        "mypy", "pyright", "tsc", "npm run typecheck", "npm run type-check"))),
+        "mypy", "pyright", "tsc", "npm run typecheck", "npm run type-check",
+        "dart analyze", "flutter analyze"))),
     ("lint", tuple(_rules(
         "ruff", "flake8", "pylint", "black --check", "eslint", "prettier --check",
         "golangci-lint", "cargo clippy", "rubocop", "npm run lint", "make lint"))),
     ("build", tuple(_rules(
         "make", "npm run build", "yarn build", "pnpm build", "cargo build", "go build",
-        "docker build", "gradle", "./gradlew", "gradlew", "mvn", "python -m build"))),
+        "docker build", "gradle", "./gradlew", "gradlew", "mvn", "python -m build",
+        "flutter build", "dart compile"))),
     ("install", tuple(_rules(
         "pip install", "pip3 install", "uv pip install", "uv add", "uv sync",
         "poetry install", "poetry add", "npm install", "npm i", "npm ci", "yarn add",
         "yarn install", "pnpm install", "pnpm add", "go get", "cargo add",
         "bundle install", "gem install", "brew install", "apt install",
-        "apt-get install"))),
+        "apt-get install", "flutter pub get", "flutter pub add", "dart pub get",
+        "dart pub add"))),
     ("git", (("git",),)),
 ]
 
 
 def _normalize(argv):
-    """Drop npx / uv run / poetry run, and turn `python -m X` into X."""
+    """Drop npx / fvm / uv run / poetry run, and turn `python -m X` into X."""
     argv = list(argv)
     if argv:  # path-qualified tools: /usr/bin/python3.11, .venv/bin/pytest, tool.exe
         name = re.split(r"[\\/]", argv[0])[-1]
         name = re.sub(r"(?i)\.exe$", "", name)
         argv[0] = re.sub(r"^(python\d*)\.\d+$", r"\1", name) or argv[0]
     while argv:
-        if argv[0] == "npx" or argv[:2] in (["uv", "run"], ["poetry", "run"]):
-            argv = argv[1:] if argv[0] == "npx" else argv[2:]
+        if argv[0] in ("npx", "fvm") or argv[:2] in (["uv", "run"], ["poetry", "run"]):
+            argv = argv[1:] if argv[0] in ("npx", "fvm") else argv[2:]
         elif (argv[0].startswith("python") and len(argv) > 2 and argv[1] == "-m"
               and argv[2] != "build"):
             argv = argv[2:]
