@@ -1,6 +1,6 @@
 # dev-guardrails
 
-A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, humanizer edits comments and docs that read like generic AI boilerplate, test-writer writes tests in your repo's own style, and bug-reproducer fixes a reported bug test-first. Install only the plugins you want.
+A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, humanizer edits comments and docs that read like generic AI boilerplate, test-writer writes tests in your repo's own style, bug-reproducer fixes a reported bug test-first, and refactor-safely refuses to refactor untested code and tests after every step. Install only the plugins you want.
 
 | Plugin | What it guards |
 | :- | :- |
@@ -13,6 +13,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [humanizer](#humanizer) | Not a guard. Flags comments and docs in your changes that read like generic AI boilerplate, and rewrites the ones you approve |
 | [test-writer](#test-writer) | Not a guard. Writes tests that match your repo's existing ones, runs them, and checks they can fail before showing you |
 | [bug-reproducer](#bug-reproducer) | Not a guard. Reproduces a bug with a failing test, waits for your approval, then makes the smallest fix |
+| [refactor-safely](#refactor-safely) | Not a guard. Refactors in small steps only when tests cover the code, and re-runs them after every step |
 | [session-recap](#session-recap) | Not a guard. Logs what a session did, then writes a short recap of what changed, its impact, what was tested, and what to do differently |
 
 ## Install
@@ -31,6 +32,7 @@ In Claude Code:
 /plugin install test-writer@dev-guardrails
 /plugin install session-recap@dev-guardrails
 /plugin install bug-reproducer@dev-guardrails
+/plugin install refactor-safely@dev-guardrails
 ```
 
 Or from your shell:
@@ -47,6 +49,7 @@ claude plugin install humanizer@dev-guardrails
 claude plugin install test-writer@dev-guardrails
 claude plugin install session-recap@dev-guardrails
 claude plugin install bug-reproducer@dev-guardrails
+claude plugin install refactor-safely@dev-guardrails
 ```
 
 Installing a plugin enables its hooks and skills. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -570,6 +573,66 @@ Like test-writer, it never reads `.env`, key, or credential files, and `--from-l
 
 `autoFix: true` skips the wait for your approval of the red test. Claude still says that it skipped it. An invalid file falls back to the default with a warning.
 
+## refactor-safely
+
+Refactors code in small, planned steps, and only when tests already protect it. It checks coverage first, records a green baseline, shows a plan, and re-runs the tests after every step. A step that breaks them is undone. It has no hooks. Call it directly, or ask Claude to "refactor ..." and its skill picks the request up.
+
+```text
+/refactor-safely:run <paths | symbol> "<goal>"
+```
+
+A script, [`scripts/refactor_gate.py`](refactor-safely/scripts/refactor_gate.py), does the checking and prints JSON. Claude plans and edits, following [`skills/refactor-safely/SKILL.md`](refactor-safely/skills/refactor-safely/SKILL.md).
+
+| Subcommand | What it does |
+| :- | :- |
+| `check <paths \| symbol>` | Finds the tests that refer to each target (same stem, imports it, names the file) and the public symbols no test mentions. The verdict is `covered`, `partial`, or `uncovered`, with the evidence. Reads a coverage report if one exists |
+| `baseline` | Runs the test command with a timeout and records pass and fail counts, the failing test names, the duration, and a hash of every test file. Verdict `green` or `red` |
+| `step` | Re-runs the same command and reports new failures, fixed tests, a falling test count, the time, the diff size, and any test file that was modified, deleted, or added since the baseline |
+| `reset` | Clears the state |
+
+State lives in git's own directory (`.git/refactor-safely-state.json`), so it isn't a project file and it is per worktree. `baseline` refuses unless the last `check` was `covered`, so the gate holds even if Claude forgets it.
+
+### How Claude works through it
+
+1. **Gate.** On `partial` or `uncovered` it refuses, says exactly what is missing, and offers characterization tests: tests that pin what the code does now, odd behavior included, without fixing it. It continues only once they pass, you agree, and `check` returns `covered`.
+2. **Baseline.** It shows you the test command and runs it. A red baseline is refused until you fix or acknowledge the failures.
+3. **Plan.** The goal, the end shape, and ordered steps, each one named (extract function, rename, inline, move, split class, replace conditional) and each passing on its own. It waits for your OK.
+4. **Steps.** Behavior-preserving only: no API, output, error, log, or side-effect change unless you asked, and no bug fixes mixed in. Bugs it notices are listed, not fixed. After each step it runs `step` and reports. A failing step is undone with its own edits (never `git reset --hard`, `git checkout --`, `git restore`, or `git stash`) and either split smaller or the work stops.
+5. **Tests stay put.** Any test file `step` reports as changed is called out. Only a mechanical update caused by a rename or move is acceptable, and it needs a justification.
+6. **Checkpoints.** After each green step it asks whether you want a commit and proposes a `refactor(scope): ...` message. It never commits for you.
+7. **Finish.** It runs the full suite, compares with the baseline, reports steps, files, diff size, and what it noticed but left alone, and runs `reset`.
+
+It stops, and tells you, when tests are flaky or too slow to run per step (it offers a targeted subset per step and the full suite at the end), when the step count outgrows the plan, or when it needs a design decision.
+
+### What it reads from test output
+
+`step` compares failing test names, so it recognises the summary of pytest, unittest, jest, vitest, mocha, `go test`, `cargo test`, JUnit (Maven and Gradle), rspec, phpunit, and `dotnet test`. For anything else it falls back to the exit code and says so.
+
+### What it won't do
+
+- **Refactor without tests**, or start from a red baseline.
+- **Change behavior.** No fixes or features are mixed in.
+- **Edit a test to get a step through**, except a mechanical rename or move, reported separately.
+- **Commit or push.**
+
+### Configuration
+
+`.claude/refactor-safely.json` in the repo:
+
+```json
+{ "testCommand": "pytest -q tests/unit", "stepTimeout": 300, "requireCoverageOver": 0 }
+```
+
+| Key | Default | Meaning |
+| :- | :- | :- |
+| `testCommand` | detected | The command to run. Overrides detection (`package.json`, `Makefile`, pytest config, CI) |
+| `stepTimeout` | `300` | Seconds a baseline or step run may take, from 1 to 3600. A run that goes over is stopped, process tree and all |
+| `requireCoverageOver` | `0` | Minimum line coverage per target, from 0 to 100. Needs a report (`lcov.info`, Cobertura `coverage.xml`, or Istanbul `coverage-final.json`). With no readable report for a target, the check fails rather than passing unmeasured. `0` turns it off |
+
+An invalid value makes the whole file fall back to the defaults, with a warning. Unknown keys warn.
+
+The command runs without a shell, so use a wrapper script or `make` target rather than `&&` or pipes. It comes from the repo, so Claude shows it to you before the first run, and `baseline` and `step` aren't pre-approved: each one asks for permission.
+
 ## session-recap
 
 Writes a short recap when you finish a piece of work: what changed, what it may affect, what testing actually ran, and what would make the next session faster. A hook records a local activity log while you work. A script reads the log and git and prints JSON. Claude reads the diff of the riskiest files and writes the recap.
@@ -667,6 +730,7 @@ An invalid value makes the whole file fall back to the defaults, with a warning.
 - **humanizer findings are heuristics.** They miss some boilerplate and flag some fine text, which is why Claude reads each region in context and you approve every change. Its comment extraction outside Python is a lexer, not a parser, so heredocs, regex literals, and nested template strings can confuse it.
 - **test-writer detection is a heuristic.** Frameworks, commands, and conventions come from config files and regex counts, not by running anything, so it reports where each command came from and how confident it is. It reads the root `package.json` and Python config only, so monorepo packages may need you to name the command.
 - **bug-reproducer parsing is a heuristic.** Stack frames and mentions come from regexes over the report, and a path from another machine is matched to repo files by its longest matching suffix, so it can point at the wrong file of the same name. Claude reads the code before trusting a candidate.
+- **refactor-safely trusts your tests.** A refactor is only as safe as the tests that cover it. `check` matches tests to code by imports, names, and paths, and lists untested symbols by name, so it can miss a gap or flag a false one. Claude reads the tests before it trusts the verdict.
 - **Use server-side protection too.** Turn on branch protection rules and secret scanning push protection on GitHub (or the GitLab equivalents) for anything that matters.
 
 ## Add another plugin to this marketplace
