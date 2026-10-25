@@ -479,6 +479,9 @@ def commands_for(repo, frameworks):
                 single_t = tool + " test --tests '{class}.{name}'"
             elif "mvnw" in repo.fileset:
                 default, file_t, single_t = (t.replace("mvn ", "./mvnw ", 1) for t in (default, file_t, single_t))
+        if lang == "dart" and (".fvmrc" in repo.fileset or ".fvm/fvm_config.json" in repo.fileset):
+            # The repo pins its Flutter SDK with FVM, so a bare `flutter` may be the wrong version.
+            default, file_t, single_t = ("fvm " + t for t in (default, file_t, single_t))
         matches = []
         for source, run, text, confidence, script in sources:
             # `npm test` runs whatever JS framework the repo has, even through a wrapper.

@@ -1138,6 +1138,8 @@ def test_project_test_command_and_claude_md_mention(repo):
     ({"Cargo.toml": "[package]\n"}, "cargo test"),
     ({"pubspec.yaml": "dependencies:\n  flutter:\n    sdk: flutter\n"}, "flutter test"),
     ({"pubspec.yaml": "name: x\ndev_dependencies:\n  test: ^1.0.0\n"}, "dart test"),
+    ({"pubspec.yaml": "dependencies:\n  flutter:\n    sdk: flutter\n", ".fvmrc": "{}"}, "fvm flutter test"),
+    ({"pubspec.yaml": "name: x\ndev_dependencies:\n  test: ^1.0.0\n", ".fvmrc": "{}"}, "fvm dart test"),
     ({}, "unknown"),
 ])
 def test_project_test_command_sources(repo, files, cmd):

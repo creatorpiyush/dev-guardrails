@@ -275,6 +275,20 @@ def test_autodetect_dart_and_flutter(tmp_path, pubspec, run):
     assert [c["run"] for c in tbc.autodetect(str(tmp_path))] == [run]
 
 
+@pytest.mark.parametrize("marker,run", [
+    (".fvmrc", "fvm flutter test"), (".fvm/fvm_config.json", "fvm flutter test"), (None, "flutter test"),
+])
+def test_autodetect_flutter_uses_fvm_when_the_repo_pins_it(tmp_path, marker, run):
+    spec = importlib.util.spec_from_file_location("tbc", str(SCRIPT))
+    tbc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tbc)
+    (tmp_path / "pubspec.yaml").write_text("dependencies:\n  flutter:\n    sdk: flutter\n")
+    if marker:
+        (tmp_path / marker).parent.mkdir(exist_ok=True)
+        (tmp_path / marker).write_text("{}")
+    assert [c["run"] for c in tbc.autodetect(str(tmp_path))] == [run]
+
+
 def test_autodetect_pubspec_without_a_test_dependency(tmp_path):
     spec = importlib.util.spec_from_file_location("tbc", str(SCRIPT))
     tbc = importlib.util.module_from_spec(spec)

@@ -825,7 +825,9 @@ def test_command(root):
     pubspec = read_text(root, "pubspec.yaml")
     if pubspec is not None:
         flutter = re.search(r"^\s*(?:flutter_test:|sdk:\s*flutter\b)", pubspec, re.M)
-        return ("flutter test" if flutter else "dart test"), "pubspec.yaml"
+        fvm = "fvm " if any(os.path.isfile(os.path.join(root, f))
+                            for f in (".fvmrc", os.path.join(".fvm", "fvm_config.json"))) else ""
+        return fvm + ("flutter test" if flutter else "dart test"), "pubspec.yaml"
     for name, cmd in (("go.mod", "go test ./..."), ("Cargo.toml", "cargo test")):
         if os.path.isfile(os.path.join(root, name)):
             return cmd, name

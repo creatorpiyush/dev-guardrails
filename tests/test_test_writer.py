@@ -608,3 +608,22 @@ def test_flutter_coverage_tool_and_services(repo):
     assert "flutter test --coverage (built in)" in out["coverage"]["tools"]
     assert out["coverage"]["reports"] == ["coverage/lcov.info"]
     assert {s["kind"] for s in out["services"]} == {"database", "network"}
+
+
+@pytest.mark.parametrize("marker", [{".fvmrc": '{"flutter": "3.24.0"}'}, {".fvm/fvm_config.json": "{}"}])
+def test_fvm_repo_gets_fvm_commands(repo, marker):
+    out = run(make(repo, dict(marker, **{"pubspec.yaml": FLUTTER_PUBSPEC})))
+    c = command(out, "flutter test")
+    assert c["run"] == "fvm flutter test" and c["file"] == "fvm flutter test {file}"
+    assert c["single"] == "fvm flutter test {file} --plain-name '{name}'"
+
+
+def test_fvm_prefix_is_only_for_dart_frameworks(repo):
+    out = run(make(repo, {".fvmrc": "{}", "pytest.ini": "[pytest]\n", "tests/test_a.py": PY_TEST}))
+    assert command(out, "pytest")["run"] == "pytest"
+
+
+def test_fvm_repo_still_prefers_the_ci_command(repo):
+    out = run(make(repo, {".fvmrc": "{}", "pubspec.yaml": FLUTTER_PUBSPEC,
+                          ".github/workflows/ci.yml": "steps:\n  - run: fvm flutter test --coverage\n"}))
+    assert command(out, "flutter test")["run"] == "fvm flutter test --coverage"

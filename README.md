@@ -325,7 +325,7 @@ Commands run in order from the repo root, stopping at the first failure. They ru
 - `run` is split with `shlex` and run without a shell. Use a list (`["pytest", "-x"]`) for Windows paths with backslashes, or set `"shell": true` on a command to run it through the shell. `timeout` is in seconds and defaults to 300.
 - All commands together get 1700 seconds, inside the hook's 1800-second timeout in `hooks.json`. A command still running when time is up counts as a timeout.
 - `skipPatterns` are gitignore-style globs, matched case-insensitively. A pattern without `/` matches the file name at any depth.
-- `autodetect: true` infers commands when there's no `commands` key: `npm run lint` and `npm test` from `package.json` scripts (skipping the `npm init` stub), `pytest -q` when `pytest.ini` or a `[tool.pytest` section in `pyproject.toml` exists, `cargo test` for `Cargo.toml`, `go test ./...` for `go.mod`, and `flutter test` (or `dart test`) for a `pubspec.yaml` that depends on `flutter_test` (or `test`). It's off by default.
+- `autodetect: true` infers commands when there's no `commands` key: `npm run lint` and `npm test` from `package.json` scripts (skipping the `npm init` stub), `pytest -q` when `pytest.ini` or a `[tool.pytest` section in `pyproject.toml` exists, `cargo test` for `Cargo.toml`, `go test ./...` for `go.mod`, and `flutter test` (or `dart test`) for a `pubspec.yaml` that depends on `flutter_test` (or `test`), with an `fvm ` prefix when the repo has `.fvmrc`. It's off by default.
 - Repo keys override user keys. `commands` wins over `autodetect`.
 - An invalid file is ignored with a warning, and the other file still applies.
 
@@ -500,7 +500,7 @@ A script, [`scripts/detect_tests.py`](test-writer/scripts/detect_tests.py), gath
 | The script finds | Details |
 | :- | :- |
 | Framework | pytest, unittest, jest, vitest, mocha, go test, cargo test, JUnit (Maven or Gradle), rspec, phpunit, dotnet test, flutter test, dart test |
-| Commands | The suite command and where it came from, in this order of trust: `package.json` scripts, `Makefile`/`justfile` targets, pytest config and `tox.ini`, CI workflow steps. Without any, the framework default, marked low confidence. Also templates for running one file or one test |
+| Commands | The suite command and where it came from, in this order of trust: `package.json` scripts, `Makefile`/`justfile` targets, pytest config and `tox.ini`, CI workflow steps. Without any, the framework default, marked low confidence. Also templates for running one file or one test. In a repo that pins its Flutter SDK with FVM (`.fvmrc` or `.fvm/fvm_config.json`), the Flutter and Dart defaults are `fvm flutter test` and `fvm dart test` |
 | Conventions | For Python, JavaScript/TypeScript, and Dart: test directories, file naming, test naming, fixtures, mocking libraries, assertion style, parametrization, setup and teardown, and arrange-act-assert comments, counted over up to 50 test files. Other languages report `unknown` and rely on exemplars |
 | Exemplars | The 3 nearest existing tests for each target: same stem, imports the target, names the file, mirrored path, same directory, shared imports |
 | Coverage by name | The target's public symbols, and which ones its existing tests mention |
