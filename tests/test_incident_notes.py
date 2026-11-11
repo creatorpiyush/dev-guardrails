@@ -284,3 +284,189 @@ def test_commit_cap_truncates(repo):
 def test_unborn_repo_has_no_commits(repo):
     out = run(repo, *WINDOW)
     assert out["ok"] is True and out["commits"] == {"count": 0, "truncated": False}
+
+
+# -- Task 3: logs ---------------------------------------------------------------
+
+LOGWIN = ("--since", "2026-11-01T09:00Z", "--until", "2026-11-01T12:00Z")
+EPOCH_10_00_05 = int(datetime(2026, 11, 1, 10, 0, 5, tzinfo=timezone.utc).timestamp())
+# Built at runtime from a split prefix so this file never holds a token-shaped literal.
+GH_TOKEN = "gh" + "p_" + "".join("abcdefghijkmnopqrstuvwyz0123456789"[(i * 7) % 34] for i in range(36))
+
+
+def write_log(tmp_path, *lines, name="app.log"):
+    p = tmp_path / name
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(p)
+
+
+def log_entries(out):
+    return [e for e in out["timeline"] if e["source"] == "log"]
+
+
+@pytest.mark.parametrize("line", [
+    "2026-11-01T10:00:05Z ERROR db timeout",
+    "2026-11-01T15:30:05+05:30 ERROR db timeout",
+    "Nov  1 10:00:05 web1 app[12]: ERROR db timeout",
+    "%d ERROR db timeout" % EPOCH_10_00_05,
+    '{"ts": %d123, "level": "error", "msg": "db timeout"}' % EPOCH_10_00_05,
+])
+def test_each_timestamp_format(repo, tmp_path, line):
+    out = run(repo, *LOGWIN, "--logs", write_log(tmp_path, line))
+    entries = log_entries(out)
+    assert len(entries) == 1 and entries[0]["ts"] == "2026-11-01T10:00:05Z"
+    assert "db timeout" in entries[0]["signature"]
+
+
+def test_mixed_zones_normalise_to_utc(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR a", "2026-11-01T15:30:20+05:30 ERROR a")
+    out = run(repo, *LOGWIN, "--logs", log)
+    assert out["logs"]["buckets"] == [{"minute": "2026-11-01T10:00:00Z", "errors": 2}]
+
+
+def test_naive_log_time_is_approximate(repo, tmp_path):
+    write_config(repo, {"timezone": "+01:00"})
+    out = run(repo, *LOGWIN, "--logs", write_log(tmp_path, "2026-11-01 11:00:05 ERROR x"))
+    entry = log_entries(out)[0]
+    assert entry["ts"] == "2026-11-01T10:00:05Z" and entry["confidence"] == "approximate"
+    assert out["logs"]["files"][0]["assumed_timezone"] == "+01:00"
+
+
+def test_zoned_log_time_is_exact(repo, tmp_path):
+    out = run(repo, *LOGWIN, "--logs", write_log(tmp_path, "2026-11-01T10:00:05Z ERROR x"))
+    assert log_entries(out)[0]["confidence"] == "exact"
+    assert out["logs"]["files"][0]["assumed_timezone"] is None
+
+
+def test_error_signature_bucketing(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR timeout after 30s for user 4411",
+                    "2026-11-01T10:01:05Z ERROR timeout after 45s for user 9",
+                    "2026-11-01T10:01:09Z INFO all good")
+    out = run(repo, *LOGWIN, "--logs", log)
+    entries = log_entries(out)
+    assert len(entries) == 1
+    assert entries[0]["signature"] == "timeout after <n>s for user <n>" and entries[0]["count"] == 2
+    assert entries[0]["ts"] == "2026-11-01T10:00:05Z" and entries[0]["line"] == 1
+    assert out["logs"]["buckets"] == [{"minute": "2026-11-01T10:00:00Z", "errors": 1},
+                                      {"minute": "2026-11-01T10:01:00Z", "errors": 1}]
+    f = out["logs"]["files"][0]
+    assert (f["lines"], f["parsed"], f["errors"]) == (3, 3, 2)
+    assert (f["first"], f["last"]) == ("2026-11-01T10:00:05Z", "2026-11-01T10:01:09Z")
+
+
+def test_json_log_signature_uses_message(repo, tmp_path):
+    log = write_log(tmp_path, '{"time": "2026-11-01T10:00:05Z", "level": "error", "msg": "db down"}',
+                    '{"time": "2026-11-01T10:00:06Z", "level": "error", "msg": "cache down"}')
+    sigs = sorted(e["signature"] for e in log_entries(run(repo, *LOGWIN, "--logs", log)))
+    assert sigs == ["cache down", "db down"]
+
+
+def test_unparseable_timestamps_reported(repo, tmp_path):
+    out = run(repo, *LOGWIN, "--logs", write_log(tmp_path, "11/01/2026 10:00 ERROR x"))
+    assert out["logs"]["unparsed"]["count"] == 1
+    assert out["logs"]["unparsed"]["samples"] == ["11/01/2026 10:00 ERROR x"]
+
+
+def test_stack_trace_continuation_lines(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR request failed",
+                    "Traceback (most recent call last):", '  File "app.py", line 3, in <module>',
+                    "    boom()", "ValueError: bad")
+    out = run(repo, *LOGWIN, "--logs", log)
+    assert out["logs"]["files"][0]["errors"] == 1 and out["logs"]["unparsed"]["count"] == 0
+
+
+def test_traceback_after_info_line_is_one_error(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z INFO handling", "Traceback (most recent call last):",
+                    '  File "app.py", line 3, in <module>')
+    out = run(repo, *LOGWIN, "--logs", log)
+    assert out["logs"]["files"][0]["errors"] == 1
+    assert log_entries(out)[0]["confidence"] == "approximate"
+
+
+def test_caps_on_large_logs(repo, tmp_path):
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    words = ("".join(letters[(i // 26 ** k) % 26] for k in range(4)) for i in range(200000))
+    lines = ("2026-11-01T10:%02d:00Z ERROR fault %s" % (i % 60, w) for i, w in enumerate(words))
+    log = write_log(tmp_path, *lines)
+    out = run(repo, *LOGWIN, "--logs", log)
+    assert len(log_entries(out)) <= 50
+    assert out["logs"]["files"][0]["errors"] == 200000
+    assert len(json.dumps(out)) < 200000
+
+
+def test_byte_cap_truncates(tmp_path):
+    m = load()
+    m.MAX_LOG_BYTES = 100
+    log = write_log(tmp_path, *["2026-11-01T10:00:05Z ERROR x"] * 50)
+    since = datetime(2026, 11, 1, 9, tzinfo=timezone.utc)
+    got = m.read_log(log, timezone.utc, (since, since + timedelta(hours=3)), DEFAULTS, {})
+    assert got["truncated"] is True and got["lines"] < 50
+
+
+def test_binary_log_skipped(repo, tmp_path):
+    p = tmp_path / "bin.log"
+    p.write_bytes(b"\x00\x01ERROR\n" * 10)
+    out = run(repo, *LOGWIN, "--logs", str(p))
+    assert out["logs"]["files"][0]["skipped"] == "binary"
+
+
+def test_missing_log_skipped_with_note(repo, tmp_path):
+    out = run(repo, *LOGWIN, "--logs", str(tmp_path / "nope.log"))
+    assert out["ok"] is True and out["logs"]["files"][0]["skipped"] == "not found"
+
+
+def test_secret_file_never_read(repo, tmp_path):
+    out = run(repo, *LOGWIN, "--logs", write_log(tmp_path, "2026-11-01T10:00:05Z ERROR x", name=".env"))
+    assert out["logs"]["files"][0]["skipped"] == "secret file"
+
+
+def test_signature_redacts_secrets_and_pii(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR auth failed token=%s for bob@example.com "
+                    "from 10.1.2.3 req 7c9e6679-7425-40de-944b-e07fc1f90ae7" % GH_TOKEN)
+    out = run(repo, *LOGWIN, "--logs", log)
+    text = json.dumps(out)
+    for leaked in (GH_TOKEN, GH_TOKEN[4:20], "bob@example.com", "10.1.2.3", "7c9e6679"):
+        assert leaked not in text
+    assert out["redactions"]["github-token"] == 1
+    assert log_entries(out)[0]["signature"] == (
+        "auth failed token=<redacted:github-token> for <email> from <ip> req <uuid>")
+
+
+def test_unparsed_sample_redacted(repo, tmp_path):
+    out = run(repo, *LOGWIN, "--logs", write_log(tmp_path, "11/01/2026 %s" % GH_TOKEN))
+    assert GH_TOKEN[4:20] not in json.dumps(out)  # not even a cut-off piece
+
+
+def test_redact_hostnames_flag(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR cannot reach db.prod.internal")
+    assert "db.prod.internal" in log_entries(run(repo, *LOGWIN, "--logs", log))[0]["signature"]
+    write_config(repo, {"redactHostnames": True})
+    sig = log_entries(run(repo, *LOGWIN, "--logs", log))[0]["signature"]
+    assert sig == "cannot reach <host>"
+
+
+def test_window_defaults_to_log_span(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z INFO start", "2026-11-01T10:20:00Z ERROR x")
+    w = run(repo, "--logs", log)["window"]
+    assert w == {"since": "2026-11-01T09:30:05Z", "until": "2026-11-01T10:50:00Z", "source": "logs"}
+
+
+def test_logs_filtered_to_window(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T08:00:00Z ERROR early", "2026-11-01T10:00:00Z ERROR inside")
+    out = run(repo, *LOGWIN, "--logs", log)
+    assert [e["signature"] for e in log_entries(out)] == ["inside"]
+    assert out["logs"]["files"][0]["first"] == "2026-11-01T08:00:00Z"
+
+
+def test_several_log_files(repo, tmp_path):
+    a = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR a", name="a.log")
+    b = write_log(tmp_path, "2026-11-01T10:00:09Z ERROR b", name="b.log")
+    out = run(repo, *LOGWIN, "--logs", a, b)
+    assert len(out["logs"]["files"]) == 2
+    assert out["logs"]["buckets"] == [{"minute": "2026-11-01T10:00:00Z", "errors": 2}]
+
+
+def test_commit_subject_redacted(repo):
+    commit(repo, "fix: drop leaked %s" % GH_TOKEN, "2026-11-01T01:00:00Z")
+    out = run(repo, *WINDOW)
+    assert GH_TOKEN not in json.dumps(out) and out["redactions"] == {"github-token": 1}

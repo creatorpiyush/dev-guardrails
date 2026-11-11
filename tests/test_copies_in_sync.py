@@ -143,3 +143,11 @@ def test_detect_tests_copied_to_refactor_safely():
     original = ROOT / "test-writer" / "scripts" / "detect_tests.py"
     copy = ROOT / "refactor-safely" / "scripts" / "detect_tests.py"
     assert original.read_bytes() == copy.read_bytes()
+
+
+INCIDENT_NOTES = ROOT / "incident-notes" / "scripts" / "gather_timeline.py"
+
+
+@pytest.mark.parametrize("name", ["SECRET_RULES", "EXTRA_REDACTIONS", "KEY_BLOCK", "redact"])
+def test_redaction_copied_to_incident_notes(name):
+    assert definition(PR_WRITER, name) == definition(INCIDENT_NOTES, name)
