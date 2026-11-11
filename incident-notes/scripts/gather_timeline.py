@@ -32,8 +32,16 @@ DEFAULT_CONFIG = {
 OFFSET = re.compile(r"^([+-])(\d{2}):?(\d{2})$")
 TZ_NAME = re.compile(r"^(UTC|[A-Za-z_]+(/[A-Za-z0-9_+\-]+)*)$")
 
+def inside_repo(v):
+    """A relative path with no '..', drive, or root: the postmortem is written under it."""
+    if not isinstance(v, str) or not v.strip():
+        return False
+    p = v.strip().replace("\\", "/")
+    return not (p.startswith("/") or re.match(r"^[A-Za-z]:", p) or ".." in p.split("/"))
+
+
 VALIDATORS = {
-    "directory": lambda v: isinstance(v, str) and bool(v.strip()),
+    "directory": inside_repo,
     "timezone": lambda v: isinstance(v, str) and bool(OFFSET.match(v) or TZ_NAME.match(v)),
     "includeAuthors": lambda v: isinstance(v, bool),
     "redactHostnames": lambda v: isinstance(v, bool),
@@ -155,6 +163,94 @@ def slugify(title):
     return "-".join(re.findall(r"[a-z0-9]+", title.lower()))[:60].strip("-")
 
 
+def git_time(text):
+    m = ISO.fullmatch((text or "").strip())
+    got = m and iso_match(m, timezone.utc)
+    return got[0] if got else None
+
+
+# -- git facts -----------------------------------------------------------------
+
+COMMIT_CAP = 200
+TIMELINE_CAP = 300
+LOG_SCAN_LIMIT = "5000"  # commits git log may return before the window filter
+HOTSPOT_CAP = 10
+HOTFIX = re.compile(r"(?i)(?:\b(?:hot-?fix|rollback|roll[ -]back|emergency|urgent|quick-?fix)\b|hotfix/)")
+
+
+def commit_kinds(subject, body, parents):
+    kinds = []
+    if subject.startswith('Revert "') or "This reverts commit" in body:
+        kinds.append("revert")
+    if HOTFIX.search(subject):
+        kinds.append("hotfix")
+    if len(parents) > 1:
+        kinds.append("merge")
+    return kinds
+
+
+def commit_events(root, since, until, include_authors, counter, cap=COMMIT_CAP):
+    """Commits on any local or remote branch or tag, by author date in the window.
+
+    Returns (entries newest first, truncated, {path: commits touching it})."""
+    out = git(root, "log", "--branches", "--tags", "--remotes", "-n", LOG_SCAN_LIMIT,
+              "--since=" + iso(since), "--name-only",
+              "--format=%x1e%H%x1f%aI%x1f%P%x1f%an%x1f%s%x1f%b%x1f")
+    entries, counts = [], {}
+    # git() strips the output, and str.strip() treats \x1e and \x1f as whitespace,
+    # so the first separator and the last record's empty trailing fields may be gone.
+    for rec in filter(None, (out or "").split("\x1e")):
+        parts = (rec.split("\x1f") + [""] * 7)[:7]
+        sha, date, parents, author, subject, body, names = parts
+        ts = git_time(date)
+        if ts is None or not since <= ts <= until:
+            continue
+        files = [n for n in names.splitlines() if n.strip()]
+        for name in files:
+            counts[name] = counts.get(name, 0) + 1
+        entry = {"ts": iso(ts), "source": "commit", "confidence": "exact",
+                 "hash": sha[:12], "subject": redact(subject, counter), "files": len(files),
+                 "kinds": commit_kinds(subject, body, parents.split())}
+        if include_authors:
+            entry["author"] = author
+        entries.append(entry)
+    return entries[:cap], len(entries) > cap, counts
+
+
+def tag_events(root, since, until):
+    out = git(root, "for-each-ref", "refs/tags",
+              "--format=%(refname:short)%1f%(objecttype)%1f%(creatordate:iso-strict)")
+    entries = []
+    for line in (out or "").splitlines():
+        parts = line.split("\x1f")
+        if len(parts) != 3:
+            continue
+        name, objtype, date = parts
+        ts = git_time(date)
+        if ts is None or not since <= ts <= until:
+            continue
+        if re.search(r"(?i)deploy|prod", name):
+            kind = "deploy"
+        elif re.search(r"(?i)^v?\d+\.\d+|release", name):
+            kind = "release"
+        else:
+            kind = "tag"
+        # A lightweight tag carries its commit's date, not the time it was tagged.
+        entries.append({"ts": iso(ts), "source": "tag",
+                        "confidence": "exact" if objtype == "tag" else "approximate",
+                        "name": name, "kind": kind})
+    return entries
+
+
+def hotspots(file_counts):
+    ranked = sorted(file_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"path": p, "commits": n} for p, n in ranked[:HOTSPOT_CAP]]
+
+
+def redact(text, counter):
+    return text
+
+
 # -- output ------------------------------------------------------------------
 
 def fail(code, message):
@@ -207,11 +303,18 @@ def main(argv, now=None):
     directory = cfg["directory"].strip().strip("/")
     output_path = ("%s/%s-%s.md" % (directory, since.strftime("%Y-%m-%d"), slug)
                    if slug else None)
+    counter = {}
+    commits, commits_truncated, file_counts = commit_events(
+        root, since, until, cfg["includeAuthors"], counter)
+    timeline = commits + tag_events(root, since, until)
+    timeline.sort(key=lambda e: (e["ts"], e["source"]))
     return {
         "ok": True, "config": cfg, "warnings": warnings,
         "title": title, "slug": slug, "output_path": output_path,
         "window": {"since": iso(since), "until": iso(until), "source": source},
-        "timeline": [], "timeline_truncated": False, "hotspots": [],
+        "timeline": timeline[:TIMELINE_CAP], "timeline_truncated": len(timeline) > TIMELINE_CAP,
+        "commits": {"count": len(commits), "truncated": commits_truncated},
+        "hotspots": hotspots(file_counts), "redactions": counter,
         "logs": {"files": [], "buckets": [], "unparsed": {"count": 0, "samples": []}},
     }
 

@@ -136,6 +136,9 @@ def test_default_window_is_last_24h(repo):
 @pytest.mark.parametrize("data", [
     {"includeAuthors": "yes"}, {"redactHostnames": 1}, {"directory": ""},
     {"timezone": "Not a zone!"}, {"severityScale": []}, {"severityScale": ["SEV1", 2]},
+    # The postmortem is written under this directory, so it must stay inside the repo.
+    {"directory": "../outside"}, {"directory": "docs/../../x"}, {"directory": "/etc"},
+    {"directory": "C:\\Users\\x"}, {"directory": "\\\\server\\share"},
 ])
 def test_invalid_config_falls_back_with_warning(repo, data):
     write_config(repo, data)
@@ -159,3 +162,125 @@ def test_slug_and_output_path(repo):
 
 def test_slug_capped():
     assert len(load().slugify("word " * 40)) <= 60
+
+
+# -- Task 2: commits, tags, hotspots ------------------------------------------
+
+def git(root, *args, date=None):
+    env = dict(os.environ)
+    if date:
+        env.update(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date)
+    r = subprocess.run(["git", "-c", "user.name=Ann", "-c", "user.email=ann@example.com",
+                        *args], cwd=root, env=env, check=True, capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def commit(root, subject, date, files=("f.txt",), body=None):
+    for name in files:
+        p = root / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(p.read_text() + "x\n" if p.exists() else "x\n")
+        git(root, "add", name)
+    msg = ["-m", subject] + (["-m", body] if body else [])
+    git(root, "commit", "-q", *msg, date=date)
+    return git(root, "rev-parse", "HEAD")
+
+
+def commits_of(out):
+    return [e for e in out["timeline"] if e["source"] == "commit"]
+
+
+def test_commit_window_selection(repo):
+    commit(repo, "feat: early", "2026-11-01T09:00:00Z")
+    commit(repo, "feat: inside", "2026-11-01T11:00:00Z")
+    commit(repo, "feat: late", "2026-11-01T13:00:00Z")
+    out = run(repo, "--since", "2026-11-01T10:00Z", "--until", "2026-11-01T12:00Z")
+    entries = commits_of(out)
+    assert [e["subject"] for e in entries] == ["feat: inside"]
+    assert entries[0]["ts"] == "2026-11-01T11:00:00Z" and entries[0]["confidence"] == "exact"
+    assert len(entries[0]["hash"]) == 12
+    assert out["commits"] == {"count": 1, "truncated": False}
+
+
+def test_revert_and_hotfix_detected(repo):
+    commit(repo, 'Revert "feat: x"', "2026-11-01T01:00:00Z", body="This reverts commit abc.")
+    commit(repo, "fix: hotfix for login", "2026-11-01T02:00:00Z")
+    commit(repo, "fix: plain", "2026-11-01T03:00:00Z")
+    kinds = {e["subject"]: e["kinds"] for e in commits_of(run(repo, *WINDOW))}
+    assert kinds == {'Revert "feat: x"': ["revert"], "fix: hotfix for login": ["hotfix"],
+                     "fix: plain": []}
+
+
+def test_merge_detected(repo):
+    commit(repo, "feat: base", "2026-11-01T01:00:00Z")
+    git(repo, "switch", "-q", "-c", "side")
+    commit(repo, "feat: side", "2026-11-01T02:00:00Z", files=("s.txt",))
+    git(repo, "switch", "-q", "-")
+    commit(repo, "feat: main", "2026-11-01T02:30:00Z", files=("m.txt",))
+    git(repo, "merge", "-q", "--no-ff", "-m", "Merge branch side", "side",
+        date="2026-11-01T03:00:00Z")
+    kinds = {e["subject"]: e["kinds"] for e in commits_of(run(repo, *WINDOW))}
+    assert kinds["Merge branch side"] == ["merge"]
+
+
+def test_files_touched_count(repo):
+    commit(repo, "feat: three", "2026-11-01T01:00:00Z", files=("a", "b/c", "d"))
+    assert commits_of(run(repo, *WINDOW))[0]["files"] == 3
+
+
+def test_authors_excluded_by_default(repo):
+    commit(repo, "feat: x", "2026-11-01T01:00:00Z")
+    out = run(repo, *WINDOW)
+    assert "author" not in commits_of(out)[0] and "Ann" not in json.dumps(out)
+
+
+def test_authors_included_with_config(repo):
+    write_config(repo, {"includeAuthors": True})
+    commit(repo, "feat: x", "2026-11-01T01:00:00Z")
+    assert commits_of(run(repo, *WINDOW))[0]["author"] == "Ann"
+
+
+def test_tag_detection(repo):
+    commit(repo, "feat: x", "2026-11-01T01:00:00Z")
+    git(repo, "tag", "-a", "v1.2.0", "-m", "release", date="2026-11-01T02:00:00Z")
+    git(repo, "tag", "deploy-prod-42")
+    tags = {e["name"]: e for e in run(repo, *WINDOW)["timeline"] if e["source"] == "tag"}
+    assert tags["v1.2.0"]["kind"] == "release" and tags["v1.2.0"]["confidence"] == "exact"
+    assert tags["v1.2.0"]["ts"] == "2026-11-01T02:00:00Z"
+    assert tags["deploy-prod-42"]["kind"] == "deploy"
+    assert tags["deploy-prod-42"]["confidence"] == "approximate"
+
+
+def test_tag_outside_window_excluded(repo):
+    commit(repo, "feat: x", "2026-10-01T01:00:00Z")
+    git(repo, "tag", "old-tag")
+    assert not [e for e in run(repo, *WINDOW)["timeline"] if e["source"] == "tag"]
+
+
+def test_hotspots_ranked(repo):
+    commit(repo, "a", "2026-11-01T01:00:00Z", files=("hot.py", "warm.py"))
+    commit(repo, "b", "2026-11-01T02:00:00Z", files=("hot.py",))
+    out = run(repo, *WINDOW)
+    assert out["hotspots"] == [{"path": "hot.py", "commits": 2}, {"path": "warm.py", "commits": 1}]
+
+
+def test_timeline_sorted(repo):
+    commit(repo, "b", "2026-11-01T02:00:00Z")
+    commit(repo, "a", "2026-11-01T01:00:00Z")
+    ts = [e["ts"] for e in run(repo, *WINDOW)["timeline"]]
+    assert ts == sorted(ts)
+
+
+def test_commit_cap_truncates(repo):
+    for i in range(3):
+        commit(repo, "c%d" % i, "2026-11-01T0%d:00:00Z" % (i + 1))
+    m = load()
+    since = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    entries, truncated, _ = m.commit_events(str(repo), since, since + timedelta(hours=6),
+                                            False, {}, cap=2)
+    assert len(entries) == 2 and truncated is True
+
+
+def test_unborn_repo_has_no_commits(repo):
+    out = run(repo, *WINDOW)
+    assert out["ok"] is True and out["commits"] == {"count": 0, "truncated": False}
