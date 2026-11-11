@@ -470,3 +470,106 @@ def test_commit_subject_redacted(repo):
     commit(repo, "fix: drop leaked %s" % GH_TOKEN, "2026-11-01T01:00:00Z")
     out = run(repo, *WINDOW)
     assert GH_TOKEN not in json.dumps(out) and out["redactions"] == {"github-token": 1}
+
+
+# -- Task 4: merged PRs and templates ------------------------------------------
+
+def fake_gh(bin_dir, auth_code=0, prs=None, raw=None):
+    """A gh stand-in: `auth status` exits auth_code; `pr list` prints prs as JSON (or raw)."""
+    bin_dir.mkdir(exist_ok=True)
+    body = raw if raw is not None else json.dumps(prs or [])
+    script = bin_dir / "fake_gh.py"
+    script.write_text(
+        "import sys\n"
+        "if sys.argv[1:3] == ['auth', 'status']: sys.exit(%d)\n"
+        "if sys.argv[1:3] == ['pr', 'list']: print(%r); sys.exit(0)\n"
+        "sys.exit(2)\n" % (auth_code, body))
+    if os.name == "nt":
+        (bin_dir / "gh.bat").write_text('@"%s" "%s" %%*\n' % (sys.executable, script))
+    else:
+        p = bin_dir / "gh"
+        p.write_text('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, script))
+        p.chmod(0o755)
+    return {"INCIDENT_NOTES_CLI_PATH": str(bin_dir)}
+
+
+PRS = [
+    {"number": 7, "title": "fix: pool size", "mergedAt": "2026-11-01T03:00:00Z", "url": "https://x/7"},
+    {"number": 8, "title": "feat: later", "mergedAt": "2026-11-01T09:00:00Z", "url": "https://x/8"},
+]
+
+
+def test_gh_missing_handled(repo):
+    prs = run(repo, *WINDOW)["prs"]
+    assert prs["status"] == "skipped" and "not found" in prs["note"] and prs["count"] == 0
+
+
+def test_gh_unauthenticated_skipped(repo, tmp_path):
+    out = run(repo, *WINDOW, env=fake_gh(tmp_path / "bin", auth_code=1, prs=PRS))
+    assert out["prs"]["status"] == "skipped" and "not signed in" in out["prs"]["note"]
+    assert not [e for e in out["timeline"] if e["source"] == "pr"]
+
+
+def test_gh_prs_in_window(repo, tmp_path):
+    out = run(repo, *WINDOW, env=fake_gh(tmp_path / "bin", prs=PRS))
+    prs = [e for e in out["timeline"] if e["source"] == "pr"]
+    assert prs == [{"ts": "2026-11-01T03:00:00Z", "source": "pr", "confidence": "exact",
+                    "number": 7, "title": "fix: pool size", "url": "https://x/7"}]
+    assert out["prs"] == {"status": "ok", "note": None, "count": 1}
+
+
+def test_gh_pr_title_redacted(repo, tmp_path):
+    prs = [dict(PRS[0], title="fix: rotate %s" % GH_TOKEN)]
+    out = run(repo, *WINDOW, env=fake_gh(tmp_path / "bin", prs=prs))
+    assert GH_TOKEN not in json.dumps(out)
+
+
+def test_gh_failure_is_valid_json(repo, tmp_path):
+    out = run(repo, *WINDOW, env=fake_gh(tmp_path / "bin", raw="not json {"))
+    assert out["ok"] is True and out["prs"]["status"] == "skipped"
+    assert "failed" in out["prs"]["note"]
+
+
+def test_gh_inside_repo_ignored(repo):
+    fake_gh(repo / "bin", prs=PRS)
+    out = run(repo, *WINDOW, env={"INCIDENT_NOTES_CLI_PATH": str(repo / "bin")})
+    assert out["prs"]["status"] == "skipped" and "not found" in out["prs"]["note"]
+
+
+def test_template_detection_dir(repo):
+    (repo / "docs" / "incidents").mkdir(parents=True)
+    (repo / "docs" / "incidents" / "TEMPLATE.md").write_text("# Title\n\n## Impact\ntext\n## Timeline\n")
+    out = run(repo, "Pool exhausted", *WINDOW)
+    assert out["template"] == {"directory": "docs/incidents",
+                               "template": "docs/incidents/TEMPLATE.md",
+                               "headings": ["# Title", "## Impact", "## Timeline"]}
+    assert out["output_path"] == "docs/incidents/2026-11-01-pool-exhausted.md"
+
+
+def test_template_detection_issue_template(repo):
+    (repo / ".github" / "ISSUE_TEMPLATE").mkdir(parents=True)
+    (repo / ".github" / "ISSUE_TEMPLATE" / "postmortem.md").write_text("---\nname: pm\n---\n## Summary\n")
+    t = run(repo, *WINDOW)["template"]
+    assert t["template"] == ".github/ISSUE_TEMPLATE/postmortem.md" and t["headings"] == ["## Summary"]
+
+
+def test_configured_directory_wins(repo):
+    write_config(repo, {"directory": "ops/pm"})
+    (repo / "ops" / "pm").mkdir(parents=True)
+    (repo / "docs" / "postmortems").mkdir(parents=True)
+    out = run(repo, "x", *WINDOW)
+    assert out["template"]["directory"] == "ops/pm" and out["output_path"].startswith("ops/pm/")
+
+
+def test_no_template(repo):
+    out = run(repo, "Pool exhausted", *WINDOW)
+    assert out["template"] == {"directory": None, "template": None, "headings": []}
+    assert out["output_path"] == "docs/postmortems/2026-11-01-pool-exhausted.md"
+
+
+def test_headings_skip_code_blocks_and_cap(repo):
+    (repo / "docs" / "postmortems").mkdir(parents=True)
+    text = "```\n# not a heading\n```\n" + "".join("## H%d\n" % i for i in range(60))
+    (repo / "docs" / "postmortems" / "template.md").write_text(text)
+    headings = run(repo, *WINDOW)["template"]["headings"]
+    assert "# not a heading" not in headings and len(headings) == 40

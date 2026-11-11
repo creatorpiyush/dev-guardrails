@@ -16,6 +16,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -514,6 +515,110 @@ def read_log(path, tz, window, cfg, counter, ref=None):
     return info
 
 
+# -- merged PRs (gh) -------------------------------------------------------------
+
+PR_LIMIT = "100"
+
+
+def find_gh(root, path=None):
+    """The gh binary, never one inside the repository or the current directory."""
+    if path is None:
+        path = os.environ.get("INCIDENT_NOTES_CLI_PATH")  # test seam: lets tests hide the real gh
+    which = shutil.which("gh", path=path)
+    if not which:
+        return None
+    norm = lambda p: os.path.normcase(os.path.realpath(p))
+    d, cwd, top = norm(os.path.dirname(which)), norm(os.getcwd()), norm(root)
+    # Windows searches the cwd first; never run a binary the repo could have planted.
+    if d == cwd or d == top or d.startswith(top.rstrip(os.sep) + os.sep):
+        return None
+    return which
+
+
+def pr_events(root, since, until, counter):
+    """(entries, status) for PRs merged in the window, read with `gh pr list`."""
+    def skipped(note):
+        return [], {"status": "skipped", "note": note, "count": 0}
+
+    gh = find_gh(root)
+    if not gh:
+        return skipped("gh not found")
+    try:
+        if subprocess.run([gh, "auth", "status"], cwd=root, capture_output=True,
+                          timeout=10).returncode != 0:
+            return skipped("gh not signed in")
+        r = subprocess.run(
+            [gh, "pr", "list", "--state", "merged", "--limit", PR_LIMIT,
+             "--search", "merged:%s..%s" % (since.strftime("%Y-%m-%d"), until.strftime("%Y-%m-%d")),
+             "--json", "number,title,mergedAt,url"],
+            cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20)
+        if r.returncode != 0:
+            return skipped("gh pr list failed")
+        data = json.loads(r.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return skipped("gh pr list failed")
+    entries = []
+    for pr in data if isinstance(data, list) else []:
+        ts = git_time(pr.get("mergedAt")) if isinstance(pr, dict) else None
+        if ts is None or not since <= ts <= until:
+            continue
+        entries.append({"ts": iso(ts), "source": "pr", "confidence": "exact",
+                        "number": pr.get("number"), "title": redact(str(pr.get("title", "")), counter),
+                        "url": pr.get("url")})
+    return entries, {"status": "ok", "note": None, "count": len(entries)}
+
+
+# -- postmortem template ---------------------------------------------------------
+
+TEMPLATE_NAMES = ("TEMPLATE.md", "template.md", "_template.md")
+HEADING_CAP = 40
+MAX_TEMPLATE_BYTES = 256 * 1024
+
+
+def headings(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read(MAX_TEMPLATE_BYTES)
+    except OSError:
+        return []
+    out, fenced = [], False
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and re.match(r"^#{1,6} \S", line):
+            out.append(line.rstrip())
+    return out[:HEADING_CAP]
+
+
+def find_template(root, cfg):
+    """The repo's postmortem directory and template, if it has them."""
+    top = os.path.realpath(root)
+
+    def inside(rel):
+        real = os.path.realpath(os.path.join(root, rel))
+        return real == top or real.startswith(top.rstrip(os.sep) + os.sep)
+
+    directory = template = None
+    for d in (cfg["directory"].strip().strip("/"), "docs/postmortems", "docs/incidents"):
+        if os.path.isdir(os.path.join(root, d)) and inside(d):
+            directory = d
+            break
+    if directory:
+        template = next((directory + "/" + n for n in TEMPLATE_NAMES
+                         if os.path.isfile(os.path.join(root, directory, n))), None)
+    if template is None:
+        issue_dir = os.path.join(root, ".github", "ISSUE_TEMPLATE")
+        names = sorted(os.listdir(issue_dir)) if os.path.isdir(issue_dir) else []
+        template = next((".github/ISSUE_TEMPLATE/" + n for n in names
+                         if n.lower().startswith("postmortem")
+                         and os.path.isfile(os.path.join(issue_dir, n))), None)
+    if template and not inside(template):
+        template = None
+    return {"directory": directory, "template": template,
+            "headings": headings(os.path.join(root, template)) if template else []}
+
+
 # -- output ------------------------------------------------------------------
 
 def fail(code, message):
@@ -557,7 +662,7 @@ def main(argv, now=None):
                 return fail("bad-arguments", "--%s %r is not a time" % (name, text))
     source = "args" if bounds else "default"
     ref = bounds.get("until") or now  # the year for syslog lines, which have none
-    spans = [] if bounds else [s for s in (log_span(p, tz, ref) for p in args.logs) if s]
+    spans = [] if bounds else [s for s in (log_span(f, tz, ref) for f in args.logs) if s]
     if spans:
         source = "logs"
         bounds = {"since": min(s[0] for s in spans) - LOG_PADDING,
@@ -569,13 +674,15 @@ def main(argv, now=None):
 
     title = (args.title or "").strip() or None
     slug = (slugify(title) if title else "") or None
-    directory = cfg["directory"].strip().strip("/")
+    template = find_template(root, cfg)
+    directory = template["directory"] or cfg["directory"].strip().strip("/")
     output_path = ("%s/%s-%s.md" % (directory, since.strftime("%Y-%m-%d"), slug)
                    if slug else None)
     counter = {}
     commits, commits_truncated, file_counts = commit_events(
         root, since, until, cfg["includeAuthors"], counter)
-    timeline = commits + tag_events(root, since, until, counter)
+    prs, pr_status = pr_events(root, since, until, counter)
+    timeline = commits + tag_events(root, since, until, counter) + prs
     files, buckets, unparsed, samples = [], {}, 0, []
     for path in args.logs:
         info = read_log(path, tz, (since, until), cfg, counter, ref=ref)
@@ -593,7 +700,8 @@ def main(argv, now=None):
         "window": {"since": iso(since), "until": iso(until), "source": source},
         "timeline": timeline[:TIMELINE_CAP], "timeline_truncated": len(timeline) > TIMELINE_CAP,
         "commits": {"count": len(commits), "truncated": commits_truncated},
-        "hotspots": hotspots(file_counts, counter), "redactions": counter,
+        "hotspots": hotspots(file_counts, counter), "prs": pr_status, "template": template,
+        "redactions": counter,
         "logs": {"files": files, "buckets": bucket_list[:MAX_BUCKETS],
                  "buckets_truncated": len(bucket_list) > MAX_BUCKETS,
                  "unparsed": {"count": unparsed, "samples": samples[:MAX_UNPARSED_SAMPLES]}},
