@@ -23,7 +23,7 @@ Pass the arguments you were given. If `python3` is missing, use `python`. Times 
 
 - `ok: false`: explain `error.code` (`not-a-repo`, `bad-arguments`, `internal-error`) and `error.message` in plain words, and stop.
 - Show any `warnings` (an ignored `.claude/incident-notes.json`, an unavailable timezone).
-- Read `window.source`: `args`, `logs` (the log span plus 30 minutes on each side), or `default` (the last 24 hours). If the window looks wrong for this incident, say so and offer to rerun with `--since`/`--until`.
+- Read `window.source`: `args`, `logs` (24 hours before the first log line to 30 minutes after the last, so the triggering change is included), or `default` (the last 24 hours). If the window looks wrong for this incident, say so and offer to rerun with `--since`/`--until`.
 - Note what was skipped: `prs.status` `skipped` with its `note`, and any `logs.files[].skipped` (`not found`, `binary`, `secret file`, `not a file`, `unreadable`) or `truncated` file.
 
 What the fields hold:

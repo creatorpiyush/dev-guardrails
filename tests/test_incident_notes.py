@@ -445,10 +445,10 @@ def test_redact_hostnames_flag(repo, tmp_path):
     assert sig == "cannot reach <host>"
 
 
-def test_window_defaults_to_log_span(repo, tmp_path):
+def test_window_defaults_to_log_span(repo, tmp_path):  # 24 hours back, 30 minutes forward
     log = write_log(tmp_path, "2026-11-01T10:00:05Z INFO start", "2026-11-01T10:20:00Z ERROR x")
     w = run(repo, "--logs", log)["window"]
-    assert w == {"since": "2026-11-01T09:30:05Z", "until": "2026-11-01T10:50:00Z", "source": "logs"}
+    assert w == {"since": "2026-10-31T10:00:05Z", "until": "2026-11-01T10:50:00Z", "source": "logs"}
 
 
 def test_logs_filtered_to_window(repo, tmp_path):
@@ -573,3 +573,67 @@ def test_headings_skip_code_blocks_and_cap(repo):
     (repo / "docs" / "postmortems" / "template.md").write_text(text)
     headings = run(repo, *WINDOW)["template"]["headings"]
     assert "# not a heading" not in headings and len(headings) == 40
+
+
+# -- final review fixes ---------------------------------------------------------
+
+def test_old_window_found_behind_newer_commits(repo):
+    commit(repo, "fix: the trigger", "2026-11-01T01:00:00Z")
+    for i in range(3):
+        commit(repo, "later %d" % i, "2026-11-20T0%d:00:00Z" % (i + 1))  # past the landing slack
+    m = load()
+    m.LOG_SCAN_LIMIT = "2"  # fewer than the newer commits, like a busy repo days later
+    since = datetime(2026, 11, 1, tzinfo=timezone.utc)
+    entries, _, _ = m.commit_events(str(repo), since, since + timedelta(hours=6), False, {})
+    assert [e["subject"] for e in entries] == ["fix: the trigger"]
+
+
+def test_unparsed_samples_mask_emails_and_ips(repo, tmp_path):
+    out = run(repo, *LOGWIN, "--logs", write_log(tmp_path, "2026/11/01 10:00 login jane@x.io from 10.9.8.7"))
+    text = json.dumps(out["logs"]["unparsed"])
+    assert out["logs"]["unparsed"]["count"] == 1 and "jane@" not in text and "10.9.8" not in text
+
+
+def test_ip_leading_line_is_not_an_unparsed_timestamp(repo, tmp_path):
+    log = write_log(tmp_path, '10.0.0.1 - - [01/Nov/2026:10:00:00 +0000] "GET / HTTP/1.1" 200')
+    assert run(repo, *LOGWIN, "--logs", log)["logs"]["unparsed"]["count"] == 0
+
+
+def test_generic_credentials_masked_in_signature(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR auth failed Authorization: Bearer "
+                    "abcdefGHIJKLmnopQRST password=hunter2 api_key: 'k-77Zq'")
+    sig = log_entries(run(repo, *LOGWIN, "--logs", log))[0]["signature"]
+    for leaked in ("abcdefGHIJ", "hunter", "77Zq"):
+        assert leaked not in sig
+    assert sig.startswith("auth failed Authorization:")
+
+
+def test_plain_words_after_secret_keywords_survive(repo, tmp_path):
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR password incorrect for token refresh")
+    sig = log_entries(run(repo, *LOGWIN, "--logs", log))[0]["signature"]
+    assert sig == "password incorrect for token refresh"
+
+
+def test_traceback_signature_uses_exception_line(repo, tmp_path):
+    log = write_log(tmp_path,
+                    "2026-11-01T10:00:05Z INFO handling a", "Traceback (most recent call last):",
+                    '  File "app.py", line 3, in <module>', "KeyError: 'x'",
+                    "2026-11-01T10:00:09Z INFO handling b", "Traceback (most recent call last):",
+                    '  File "app.py", line 9, in <module>', "ConnectionError: refused")
+    sigs = sorted(e["signature"] for e in log_entries(run(repo, *LOGWIN, "--logs", log)))
+    assert sigs == ["ConnectionError: refused", "KeyError: <str>"]
+
+
+def test_word_starting_with_z_is_not_a_zone(repo, tmp_path):
+    write_config(repo, {"timezone": "+01:00"})
+    log = write_log(tmp_path, "2026-11-01 11:00:05 Zookeeper ERROR session expired")
+    entry = log_entries(run(repo, *LOGWIN, "--logs", log))[0]
+    assert entry["ts"] == "2026-11-01T10:00:05Z" and entry["confidence"] == "approximate"
+
+
+def test_log_window_looks_back_for_the_trigger(repo, tmp_path):
+    commit(repo, "feat: shrink pool", "2026-11-01T07:00:00Z")  # 3 hours before the first log line
+    log = write_log(tmp_path, "2026-11-01T10:00:05Z ERROR pool exhausted")
+    out = run(repo, "Pool exhausted", "--logs", log)
+    assert [e["subject"] for e in commits_of(out)] == ["feat: shrink pool"]
+    assert out["output_path"] == "docs/postmortems/2026-11-01-pool-exhausted.md"

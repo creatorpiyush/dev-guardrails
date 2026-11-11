@@ -176,6 +176,9 @@ def git_time(text):
 COMMIT_CAP = 200
 TIMELINE_CAP = 300
 LOG_SCAN_LIMIT = "5000"  # commits git log may return before the window filter
+# git log filters on committer date, the window on author date. A commit authored in
+# the window may land (rebase, merge) later, so the committer bound gets this slack.
+COMMIT_LANDING_SLACK = timedelta(days=7)
 HOTSPOT_CAP = 10
 HOTFIX = re.compile(r"(?i)(?:\b(?:hot-?fix|rollback|roll[ -]back|emergency|urgent|quick-?fix)\b|hotfix/)")
 
@@ -196,7 +199,8 @@ def commit_events(root, since, until, include_authors, counter, cap=COMMIT_CAP):
 
     Returns (entries newest first, truncated, {path: commits touching it})."""
     out = git(root, "log", "--branches", "--tags", "--remotes", "-n", LOG_SCAN_LIMIT,
-              "--since=" + iso(since), "--name-only",
+              "--since=" + iso(since), "--until=" + iso(until + COMMIT_LANDING_SLACK),
+              "--name-only",
               "--format=%x1e%H%x1f%aI%x1f%P%x1f%an%x1f%s%x1f%b%x1f")
     entries, counts = [], {}
     # git() strips the output, and str.strip() treats \x1e and \x1f as whitespace,
@@ -300,7 +304,10 @@ def redact(text, counter):
 
 # -- logs ----------------------------------------------------------------------
 
-LOG_PADDING = timedelta(minutes=30)  # around the log span when no window is given
+# With no window given, it is the log span, reaching back far enough to catch the
+# change that triggered the incident, which usually comes before the first symptom.
+LOG_LOOKBACK = timedelta(hours=24)
+LOG_PADDING = timedelta(minutes=30)  # after the last log line
 MAX_LOG_BYTES = 20 * 1024 * 1024  # read from the start; the rest is reported as truncated
 MAX_SIGNATURES = 50  # distinct error signatures kept per file
 MAX_BUCKETS = 360  # per-minute error buckets in the output
@@ -313,13 +320,13 @@ SECRET_ALLOW = (".env.example", ".env.sample", ".env.template")
 
 LOG_ISO = re.compile(
     r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:[.,]\d+)?)?"
-    r"\s?(Z|z|[+-]\d{2}:?\d{2})?(?!\d)")
+    r"\s?(?:(Z|z|[+-]\d{2}:?\d{2})(?![A-Za-z]))?(?!\d)")  # "Zookeeper" is not a zone
 SYSLOG = re.compile(r"^(?:<\d+>)?([A-Z][a-z]{2}) +(\d{1,2}) (\d{2}):(\d{2}):(\d{2})")
 MONTHS = {m: i + 1 for i, m in enumerate(
     "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split())}
 LEAD_EPOCH = re.compile(r"^\[?(\d{10})(?:\.\d+)?\b|^\[?(\d{13})\b")
 JSON_EPOCH = re.compile(r'"(?:ts|time|timestamp)"\s*:\s*(?:(\d{10})(?:\.\d+)?|(\d{13}))\b')
-TIMESTAMPISH = re.compile(r"^\[?\d{1,4}[/.\-]\d{1,2}[/.\-]\d{1,4}")
+TIMESTAMPISH = re.compile(r"^\[?\d{1,4}[/.\-]\d{1,2}[/.\-]\d{1,4}(?![.\d])")  # not an IPv4
 ERROR_LINE = re.compile(
     r"\b(?:ERROR|FATAL|CRITICAL|CRIT|EMERG|ALERT|SEVERE|PANIC)\b"
     r"|(?i:level[\"']?\s*[=:]\s*[\"']?(?:error|fatal|critical)\b)"
@@ -327,15 +334,23 @@ ERROR_LINE = re.compile(
 LEVEL = re.compile(r"\b(?:ERROR|FATAL|CRITICAL|CRIT|EMERG|ALERT|SEVERE|PANIC)\b[\s:\]|-]*")
 MESSAGE_KEYS = ("msg", "message", "error", "err")
 
-# Normalisers, applied in order after secrets are redacted.
-NORMALISE = [
-    (re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"),
-     "<uuid>"),
+# Masks for credentials and personal data, applied after the provider-secret redaction.
+# Generic credentials only count after `=` or `:`, so "password incorrect" stays readable.
+PII = [
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 <secret>"),
+    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|authorization)"
+                r"\b(\s*[=:]\s*)(?!<redacted:)(?:\"[^\"]*\"|'[^']*'|\S+)"), r"\1\2<secret>"),
     (re.compile(r"\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b"), "<email>"),
     (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), "<ip>"),
     # ponytail: IPv6 needs a hex letter or '::', so clock times like 10:00:05 stay put.
     (re.compile(r"(?<![\w:])(?=[0-9a-fA-F:]*(?:[a-fA-F]|::))"
                 r"(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}(?![\w:])"), "<ip>"),
+]
+# Normalisers for error signatures, applied in order after secrets are redacted.
+NORMALISE = PII[:2] + [
+    (re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"),
+     "<uuid>"),
+] + PII[2:] + [
     (re.compile(r"\b(?:0x)?(?=[0-9a-fA-F]*\d)(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{8,}\b"), "<hex>"),
     (re.compile(r"(?<!\w)'[^'\n]*'(?!\w)|\"[^\"\n]*\""), "<str>"),
     (re.compile(r"\d+"), "<n>"),
@@ -471,6 +486,21 @@ def read_log(path, tz, window, cfg, counter, ref=None):
         info["skipped"] = skipped
         return info
     sigs = {}
+
+    def record(ev):
+        """Add a finished in-window error event to the signatures."""
+        if not ev or not ev.get("counted"):
+            return
+        sig = signature(ev["sig_line"], ev["sig_span"], cfg["redactHostnames"], counter)
+        if sig in sigs:
+            sigs[sig]["count"] += 1
+        elif len(sigs) < MAX_SIGNATURES:
+            sigs[sig] = {"ts": iso(ev["ts"]), "source": "log",
+                         "confidence": "exact" if ev["sig_exact"] else "approximate",
+                         "file": path, "line": ev["line"], "signature": sig, "count": 1}
+        else:
+            info["signatures_dropped"] += 1
+
     event = None  # the current timestamped line and the lines that continue it
     with f:
         lines = LogLines(f)
@@ -484,15 +514,19 @@ def read_log(path, tz, window, cfg, counter, ref=None):
                 info["last"] = iso(ts)
                 if not exact:
                     info["assumed_timezone"] = cfg["timezone"]
+                record(event)
                 event = {"ts": ts, "exact": exact, "error": False}
             else:
                 span = None
                 if TIMESTAMPISH.match(line):
                     info["_unparsed"] += 1
                     if len(info["_samples"]) < MAX_UNPARSED_SAMPLES:
-                        info["_samples"].append(redact(line, counter)[:SAMPLE_CHARS])
+                        info["_samples"].append(mask_pii(redact(line, counter))[:SAMPLE_CHARS])
                 if event is None:
                     continue
+                if event.get("traceback") and line[:1].strip():
+                    # The exception line ends a traceback: "KeyError: 'x'" says more than the header.
+                    event["sig_line"], event["sig_span"] = line, None
             if event["error"] or not ERROR_LINE.search(line):
                 continue
             event["error"] = True  # one error per event, however many lines it spans
@@ -501,18 +535,19 @@ def read_log(path, tz, window, cfg, counter, ref=None):
             info["errors"] += 1
             minute = iso(event["ts"])[:16] + ":00Z"
             info["_buckets"][minute] = info["_buckets"].get(minute, 0) + 1
-            sig = signature(line, span, cfg["redactHostnames"], counter)
-            if sig in sigs:
-                sigs[sig]["count"] += 1
-            elif len(sigs) < MAX_SIGNATURES:
-                sigs[sig] = {"ts": iso(event["ts"]), "source": "log",
-                             "confidence": "exact" if event["exact"] and got else "approximate",
-                             "file": path, "line": number, "signature": sig, "count": 1}
-            else:
-                info["signatures_dropped"] += 1
+            event.update(counted=True, sig_line=line, sig_span=span, line=number,
+                         sig_exact=bool(event["exact"] and got),
+                         traceback=line.startswith("Traceback (most recent call last)"))
+        record(event)
         info["truncated"] = lines.truncated
     info["_entries"] = list(sigs.values())
     return info
+
+
+def mask_pii(text):
+    for rx, repl in PII:
+        text = rx.sub(repl, text)
+    return text
 
 
 # -- merged PRs (gh) -------------------------------------------------------------
@@ -665,18 +700,20 @@ def main(argv, now=None):
     spans = [] if bounds else [s for s in (log_span(f, tz, ref) for f in args.logs) if s]
     if spans:
         source = "logs"
-        bounds = {"since": min(s[0] for s in spans) - LOG_PADDING,
+        bounds = {"since": min(s[0] for s in spans) - LOG_LOOKBACK,
                   "until": max(s[1] for s in spans) + LOG_PADDING}
     until = bounds.get("until") or now
     since = bounds.get("since") or until - timedelta(hours=24)
     if since >= until:
         return fail("bad-arguments", "--since must be before --until")
+    # The file is named for the day the incident showed, not the start of the lookback.
+    incident_day = min(s[0] for s in spans) if spans else since
 
     title = (args.title or "").strip() or None
     slug = (slugify(title) if title else "") or None
     template = find_template(root, cfg)
     directory = template["directory"] or cfg["directory"].strip().strip("/")
-    output_path = ("%s/%s-%s.md" % (directory, since.strftime("%Y-%m-%d"), slug)
+    output_path = ("%s/%s-%s.md" % (directory, incident_day.strftime("%Y-%m-%d"), slug)
                    if slug else None)
     counter = {}
     commits, commits_truncated, file_counts = commit_events(

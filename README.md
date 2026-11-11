@@ -731,7 +731,7 @@ Turns a debugging session into a blameless postmortem draft: summary, impact, a 
 /incident-notes:draft ["<incident title>"] [--since <time>] [--until <time>] [--logs <paths>]
 ```
 
-Times can be ISO 8601, RFC 3339, epoch seconds, or `3 hours ago`. Without them, the window is the span of the log files plus 30 minutes on each side, or the last 24 hours when there are no logs.
+Times can be ISO 8601, RFC 3339, epoch seconds, or `3 hours ago`. Without them, the window runs from 24 hours before the first log line, to catch the change that triggered the incident, to 30 minutes after the last one. With no logs, it is the last 24 hours.
 
 A script, [`scripts/gather_timeline.py`](incident-notes/scripts/gather_timeline.py), collects the facts for the window and prints JSON, every timestamp in UTC and every entry tagged with its source and whether its time is exact or approximate:
 
@@ -742,7 +742,7 @@ A script, [`scripts/gather_timeline.py`](incident-notes/scripts/gather_timeline.
 - **Log files** you pass with `--logs`: the first and last timestamp, errors per minute, and the first occurrence of each distinct error. It reads ISO 8601, RFC 3339, syslog, and epoch timestamps, and reports the lines whose timestamp it couldn't read. Lines with no timezone use the configured one and are marked approximate. Continuation lines, such as a stack trace, belong to the line before them.
 - **Your postmortem template**, from `docs/postmortems`, `docs/incidents`, or `.github/ISSUE_TEMPLATE/postmortem*`.
 
-Error messages are grouped by a signature with numbers, IDs, emails, IP addresses, and quoted values masked, so the same error groups together and customer identifiers don't reach the draft. Secrets in commit subjects, PR titles, tag names, and log lines are redacted first. Logs are read up to 20 MB each, and the output is capped. Files named like secrets (`.env`, `*.pem`, `*.key`, `id_rsa*`) are never read.
+Error messages are grouped by a signature with numbers, IDs, emails, IP addresses, quoted values, and `password=`/`Bearer` style credentials masked, so the same error groups together and customer identifiers don't reach the draft. Secrets in commit subjects, PR titles, tag names, and log lines are redacted first. Logs are read up to 20 MB each, and the output is capped. Files named like secrets (`.env`, `*.pem`, `*.key`, `id_rsa*`) are never read.
 
 ### How Claude works through it
 
