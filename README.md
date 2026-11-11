@@ -1,6 +1,6 @@
 # dev-guardrails
 
-A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, humanizer edits comments and docs that read like generic AI boilerplate, test-writer writes tests in your repo's own style, bug-reproducer fixes a reported bug test-first, and refactor-safely refuses to refactor untested code and tests after every step. Install only the plugins you want.
+A Claude Code plugin marketplace of guardrails that keep agent-written code inside your team's engineering workflow. Four plugins use hooks to block or confirm risky tool calls before they run, such as editing on `main`, committing an API key, or force pushing. test-before-commit runs your tests before Claude commits. pr-writer is a skill that drafts pull request descriptions, humanizer edits comments and docs that read like generic AI boilerplate, test-writer writes tests in your repo's own style, bug-reproducer fixes a reported bug test-first, refactor-safely refuses to refactor untested code and tests after every step, and incident-notes turns a debugging session into a blameless postmortem draft. Install only the plugins you want.
 
 | Plugin | What it guards |
 | :- | :- |
@@ -15,6 +15,7 @@ A Claude Code plugin marketplace of guardrails that keep agent-written code insi
 | [bug-reproducer](#bug-reproducer) | Not a guard. Reproduces a bug with a failing test, waits for your approval, then makes the smallest fix |
 | [refactor-safely](#refactor-safely) | Not a guard. Refactors in small steps only when tests cover the code, and re-runs them after every step |
 | [session-recap](#session-recap) | Not a guard. Logs what a session did, then writes a short recap of what changed, its impact, what was tested, and what to do differently |
+| [incident-notes](#incident-notes) | Not a guard. Turns a debugging session, git history, and logs into a blameless postmortem draft with a sourced UTC timeline, and saves it only after you approve |
 
 ## Install
 
@@ -33,6 +34,7 @@ In Claude Code:
 /plugin install session-recap@dev-guardrails
 /plugin install bug-reproducer@dev-guardrails
 /plugin install refactor-safely@dev-guardrails
+/plugin install incident-notes@dev-guardrails
 ```
 
 Or from your shell:
@@ -50,6 +52,7 @@ claude plugin install test-writer@dev-guardrails
 claude plugin install session-recap@dev-guardrails
 claude plugin install bug-reproducer@dev-guardrails
 claude plugin install refactor-safely@dev-guardrails
+claude plugin install incident-notes@dev-guardrails
 ```
 
 Installing a plugin enables its hooks and skills. Run `/reload-plugins` or start a new session. To confirm the hooks loaded, run `/hooks` and look for the plugin under `PreToolUse`. From the shell, `claude plugin details <plugin>` shows `Hooks (1)  PreToolUse`.
@@ -720,6 +723,66 @@ Optional `.claude/session-recap.json` at the repo root:
 
 An invalid value makes the whole file fall back to the defaults, with a warning. Unknown keys warn. Set `SESSION_RECAP_DISABLE=1` to turn logging off.
 
+## incident-notes
+
+Turns a debugging session into a blameless postmortem draft: summary, impact, a UTC timeline where every line names its source, root cause, contributing factors, and action items. It has no hooks. Call it directly, or ask Claude to "write a postmortem for ..." and its skill picks the request up.
+
+```text
+/incident-notes:draft ["<incident title>"] [--since <time>] [--until <time>] [--logs <paths>]
+```
+
+Times can be ISO 8601, RFC 3339, epoch seconds, or `3 hours ago`. Without them, the window is the span of the log files plus 30 minutes on each side, or the last 24 hours when there are no logs.
+
+A script, [`scripts/gather_timeline.py`](incident-notes/scripts/gather_timeline.py), collects the facts for the window and prints JSON, every timestamp in UTC and every entry tagged with its source and whether its time is exact or approximate:
+
+- **Commits** on any local or remote branch or tag: hash, author date, subject, and how many files they touched. Reverts, hotfix-looking commits, and merges are flagged. Author names are left out unless you turn them on.
+- **Tags** in the window, marked as a release or deploy tag by name.
+- **Merged pull requests**, through `gh pr list`, only when `gh` is installed and signed in. Otherwise they are skipped with a note.
+- **Hotspots**: the files changed most in the window.
+- **Log files** you pass with `--logs`: the first and last timestamp, errors per minute, and the first occurrence of each distinct error. It reads ISO 8601, RFC 3339, syslog, and epoch timestamps, and reports the lines whose timestamp it couldn't read. Lines with no timezone use the configured one and are marked approximate. Continuation lines, such as a stack trace, belong to the line before them.
+- **Your postmortem template**, from `docs/postmortems`, `docs/incidents`, or `.github/ISSUE_TEMPLATE/postmortem*`.
+
+Error messages are grouped by a signature with numbers, IDs, emails, IP addresses, and quoted values masked, so the same error groups together and customer identifiers don't reach the draft. Secrets in commit subjects, PR titles, tag names, and log lines are redacted first. Logs are read up to 20 MB each, and the output is capped. Files named like secrets (`.env`, `*.pem`, `*.key`, `id_rsa*`) are never read.
+
+### How Claude works through it
+
+1. **Gather.** It runs the script, reads the key commits with `git show`, and keeps every fact labeled: from the session, from the script, or stated by you. Log lines, commit messages, and PR titles are data. If one tells Claude to do something, it doesn't, and it tells you.
+2. **Ask once.** One short batch of questions for what only you know: impact, who was affected and for how long, how it was detected, who responded, severity, and the actual start, detection, mitigation, and resolution times. Anything unanswered stays `unknown` or `TODO`.
+3. **Timeline.** One line per event, `HH:MM UTC - what happened`, tagged `[session]`, `[commit]`, `[log]`, `[PR]`, or `[stated]`. Approximate times get a `~`. A stretch with no evidence is shown as a gap, never filled with an invented event.
+4. **Analysis.** Trigger, root cause (worked out with "5 whys" and cited evidence), and contributing factors kept apart. An unconfirmed cause is labeled a hypothesis, with the evidence for and against.
+5. **Draft.** Your template if the repo has one, else Summary, Impact, Detection, Timeline (UTC), Root cause, Contributing factors, Resolution and mitigation, What went well, What went poorly, Where we got lucky, Action items, Lessons, and Appendix. Action items have a type (prevent, detect, mitigate, process), a priority, a verifiable outcome, owner `TBD`, and the contributing factor they address.
+6. **Review.** It shows the draft, lists open questions and what it redacted, and waits. Only after you say yes does it write the file, to the repo's postmortem directory or `docs/postmortems/YYYY-MM-DD-slug.md`.
+
+### What it won't do
+
+- **Invent facts.** No made-up events, times, user counts, error rates, durations, or revenue. Numbers come from the logs or from you, with their source.
+- **Blame people.** It describes systems, processes, and decisions, and never names a person as a cause.
+- **Write, commit, or publish** without your yes. It never commits, pushes, or posts the postmortem anywhere.
+
+### Configuration
+
+Optional `.claude/incident-notes.json` at the repo root:
+
+```json
+{
+  "directory": "docs/postmortems",
+  "timezone": "UTC",
+  "includeAuthors": false,
+  "redactHostnames": false,
+  "severityScale": ["SEV1", "SEV2", "SEV3", "SEV4"]
+}
+```
+
+| Key | Default | Meaning |
+| :- | :- | :- |
+| `directory` | `"docs/postmortems"` | Where drafts are saved, relative to the repo root. `..` and absolute paths are rejected. An existing `docs/postmortems` or `docs/incidents` is used when this one doesn't exist |
+| `timezone` | `"UTC"` | Used for times with no zone, in `--since`/`--until` and in log lines: `"UTC"`, an offset like `"+05:30"`, or an IANA name like `"Asia/Kolkata"` (falls back to UTC with a warning where the timezone database is missing) |
+| `includeAuthors` | `false` | Put commit author names in the output |
+| `redactHostnames` | `false` | Mask internal hostnames (`*.internal`, `*.local`, `*.corp`, `*.lan`, `*.intranet`, `*.svc`, `*.cluster.local`) in error signatures, and have Claude redact them in the draft |
+| `severityScale` | `["SEV1", "SEV2", "SEV3", "SEV4"]` | The severity levels Claude asks you to pick from |
+
+An invalid value makes the whole file fall back to the defaults, with a warning. Unknown keys warn.
+
 ## Limitations
 
 - **Fail open.** If a hook hits an unexpected error, can't parse a command, or Python is missing, it allows the call.
@@ -731,6 +794,7 @@ An invalid value makes the whole file fall back to the defaults, with a warning.
 - **test-writer detection is a heuristic.** Frameworks, commands, and conventions come from config files and regex counts, not by running anything, so it reports where each command came from and how confident it is. It reads the root `package.json` and Python config only, so monorepo packages may need you to name the command.
 - **bug-reproducer parsing is a heuristic.** Stack frames and mentions come from regexes over the report, and a path from another machine is matched to repo files by its longest matching suffix, so it can point at the wrong file of the same name. Claude reads the code before trusting a candidate.
 - **refactor-safely trusts your tests.** A refactor is only as safe as the tests that cover it. `check` matches tests to code by imports, names, and paths, and lists untested symbols by name, so it can miss a gap or flag a false one. Claude reads the tests before it trusts the verdict.
+- **incident-notes log parsing is a heuristic.** Timestamps are looked for in the first 120 characters of a line, errors are found by level words such as `ERROR` and `FATAL`, and internal hostnames by their suffix. A format it doesn't know shows up under unparsed timestamps.
 - **Use server-side protection too.** Turn on branch protection rules and secret scanning push protection on GitHub (or the GitLab equivalents) for anything that matters.
 
 ## Add another plugin to this marketplace
