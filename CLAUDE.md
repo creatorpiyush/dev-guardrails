@@ -16,6 +16,7 @@ python -m pytest tests/test_test_writer.py                       # test-writer t
 python -m pytest tests/test_session_recap.py                     # session-recap tests
 python -m pytest tests/test_bug_reproducer.py                    # bug-reproducer tests
 python -m pytest tests/test_refactor_safely.py                   # refactor-safely tests
+python -m pytest tests/test_incident_notes.py                    # incident-notes tests
 python -m pytest -k push                          # tests matching a name
 claude plugin validate .                          # marketplace.json + every relative-path plugin
 claude plugin validate ./<plugin>                 # one plugin's manifest
@@ -173,6 +174,19 @@ No hooks. `skills/run/SKILL.md` (`disable-model-invocation: true`, invoked as `/
 - **Trust boundary:** `testCommand` in the repo file runs on `baseline` and `step`. Those subcommands are not in the skills' `allowed-tools`, so each asks. The skill passes `--command` on `baseline` so the prompt shows what runs, and `step` reuses the command stored at baseline.
 - Skill rules: refuse on `partial` or `uncovered`, refuse a red baseline, plan and wait, behavior-preserving only, undo with own edits (never `git reset --hard`, `git checkout --`, `git restore`, `git stash`), call out any test change, ask before a checkpoint commit, never commit or push. If you change a rule, update both SKILL.md files and the README together.
 - **Copied pieces, keep in sync:** `scripts/detect_tests.py` is a byte-identical copy of `test-writer/scripts/detect_tests.py`. Change test-writer's, then copy it. `tests/test_copies_in_sync.py` compares the bytes.
+
+### incident-notes
+
+No hooks. `skills/draft/SKILL.md` (`disable-model-invocation: true`, invoked as `/incident-notes:draft`) loads `skills/incident-notes/SKILL.md` by path. That skill is also model-invocable, so "write a postmortem" triggers it. `scripts/gather_timeline.py` gathers facts; Claude asks, analyses, and writes.
+
+- `gather_timeline.py` is a single stdlib-only file, Python 3.9 compatible. It prints one JSON object and always exits 0. Failures are `{"ok": false, "error": {"code", "message"}}` with codes `not-a-repo`, `bad-arguments`, `internal-error`. It never writes files. Every `git` call goes through `git()`, which returns `None` on failure. `git()` strips output, and `str.strip()` eats `\x1e`/`\x1f`, so `commit_events()` skips empty records and pads fields.
+- Every output timestamp is UTC (`iso()`), and every `timeline` entry has `source` (`commit`, `tag`, `pr`, `log`) and `confidence` (`exact`, `approximate`). Naive times use config `timezone` and are approximate; so are syslog lines (no year, taken from `--until` or now), lightweight tags, and errors found on continuation lines.
+- Window: `--since`/`--until`, else the log span from `LOG_LOOKBACK` before its first line to `LOG_PADDING` after its last (a first pass, `log_span()`), else the last 24 hours. `window.source` says which.
+- Logs: `read_log()` streams up to `MAX_LOG_BYTES`. A timestamped line starts an event and lines without one continue it; an event counts as at most one error (`ERROR_LINE`). `signature()` redacts secrets first, then masks with `NORMALISE` (and `HOSTNAME` when `redactHostnames`). Unparsed samples get `redact()` plus `PII`. A `Traceback` header's signature comes from the exception line that ends it. JSON lines use their `msg`/`message`/`error`/`err` field. Files matching `SECRET_NAMES` are never opened.
+- `gh` runs only as `gh auth status` and `gh pr list`, through `find_gh()`, which rejects a binary inside the repo or cwd. `INCIDENT_NOTES_CLI_PATH` is the test seam that hides the real `gh`.
+- Config `directory` must be relative with no `..` (`inside_repo()`), and `find_template()` realpaths the directory and template inside the repo, because the skill writes the postmortem there.
+- Skill rules: facts labeled session/script/stated, one batch of questions, never invent events, times, numbers, or impact, `~` on approximate times and explicit gap lines, trigger/root cause/contributing factors kept apart with hypotheses labeled, blameless language, action items typed with owner `TBD`, redact before showing, write only after an explicit yes, never commit or publish. If you change a rule, update both SKILL.md files and the README together.
+- **Copied pieces, keep in sync:** `SECRET_RULES`, `EXTRA_REDACTIONS`, `KEY_BLOCK`, and `redact` from `pr-writer/scripts/collect_context.py`, checked by `tests/test_copies_in_sync.py`.
 
 ### Tests
 

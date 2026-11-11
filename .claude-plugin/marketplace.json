@@ -60,6 +60,11 @@
       "name": "refactor-safely",
       "source": "./refactor-safely",
       "description": "Refuses to refactor code that lacks tests, refactors in small planned steps, and re-runs the tests after every step."
+    },
+    {
+      "name": "incident-notes",
+      "source": "./incident-notes",
+      "description": "Turns a debugging session into a blameless postmortem draft with a sourced UTC timeline, root cause, and follow-ups."
     }
   ]
 }
